@@ -24,5 +24,17 @@ if(BUILD_MERLIN)
 endif()
 project(riesling LANGUAGES CXX)
 include(Version)
+# Optional CPU-specific build. Empty (default) keeps the portable baseline x86-64 build.
+# native = this machine only, x86-64-v3 = AVX2+FMA, x86-64-v4 = AVX-512
+set(RL_ARCH "" CACHE STRING "Value for -march (native, x86-64-v3, x86-64-v4); empty for compiler default")
+if(RL_ARCH)
+  unset(RL_ARCH_SUPPORTED CACHE)
+  check_cxx_compiler_flag("-march=${RL_ARCH}" RL_ARCH_SUPPORTED)
+  if(NOT RL_ARCH_SUPPORTED)
+    message(FATAL_ERROR "Compiler does not support -march=${RL_ARCH}")
+  endif()
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-march=${RL_ARCH}>") # CXX only, keeps it away from nvcc (gewurz)
+  message(STATUS "Building for -march=${RL_ARCH}")
+endif()
 add_definitions(-DEIGEN_USE_THREADS -DEIGEN_DONT_PARALLELIZE) # Ensure this is always defined across all .cpp files
 add_subdirectory(cxx)

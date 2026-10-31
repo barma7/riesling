@@ -5,6 +5,7 @@ USAGE="Usage: $0 [options]
 Bootstraps the riesling build system (specifies the toolchain for CMake)
 
 Options:
+  -a ARCH Build for a CPU (-march=ARCH), e.g. native or x86-64-v3
   -g     Build GEWURZ
   -i DIR Install riesling to this directory, e.g. $HOME/.local
   -j N   Restrict parallel build to this many threads
@@ -17,8 +18,10 @@ GEWURZ="-DBUILD_GEWURZ=OFF"
 ALL=""
 DEBUG=""
 RELDBG="-O2 -g -DNDEBUG"
-while getopts "ghi:j:w" opt; do
+ARCH=""
+while getopts "a:ghi:j:w" opt; do
     case $opt in
+        a) ARCH="-DRL_ARCH=$OPTARG";;
         g) GEWURZ="-DBUILD_GEWURZ=ON";;
         i) PREFIX="-DCMAKE_INSTALL_PREFIX=$OPTARG";;
         j) export VCPKG_MAX_CONCURRENCY=$OPTARG
@@ -62,7 +65,7 @@ cmake -S . -B build $GEN\
   -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_INSTALL_OPTIONS="--no-print-usage" \
   -DCMAKE_CXX_FLAGS="$ALL" -DCMAKE_CXX_FLAGS_DEBUG="$DEBUG" -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="$RELDBG"\
-  "$PREFIX" "$MONTAGE" "$GEWURZ"
+  "$PREFIX" "$MONTAGE" "$GEWURZ" "$ARCH"
 
 cmake --build build $PAR
 
