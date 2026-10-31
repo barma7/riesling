@@ -60,10 +60,11 @@ template <int ND> void run_grid(args::Subparser &parser)
   TrajectoryN<ND> traj(reader, reader.readStruct<Info>(HD5::Keys::Info).voxel_size.head<ND>(), coreArgs.matrix.Get());
   auto const      basis = LoadBasis(coreArgs.basisFile.Get());
 
-  auto const  shape = reader.dimensions();
-  auto const  nC = shape[0];
-  Index const nS = shape[shape.size() - 2];
-  auto const  nT = shape[shape.size() - 1];
+  auto const shape = reader.dimensions();
+  // Non-Cartesian input is [c, sample, trace, slab, t]; Cartesian input (--fwd) is [i, j, (k,) b, c, (slab,) t]
+  Index const nC = fwd ? shape[ND + 1] : shape[0];
+  Index const nS = (fwd && ND == 3) ? 1 : shape[shape.size() - 2];
+  Index const nT = shape[shape.size() - 1];
   auto const  A = MakeGrid(gridArgs.Get(), traj, nC, nS, nT, basis.get());
 
   HD5::Writer writer(coreArgs.oname.Get());
