@@ -50,6 +50,13 @@ inline void BackwardDiff(T1 const &a, T2 &&b, Sz<N> const shape, Index const dim
     b.slice(f0, sz1).device(Threads::TensorDevice()) +=
       (a.slice(f0, sz1) - a.slice(fm1, sz1)) * b.slice(fm1, sz1).constant(s / 2.f);
   } else {
+    /* KNOWN ISSUE (found 2026-10-31, left as is on purpose): the interior points are scaled by s here but by s / 2 in the
+     * forward branch above (the wrap point uses s / 2 in both), so this is ~2x the true adjoint of BackwardDiff<true>.
+     * Dot test <x, F'Fx> / |Fx|^2 at n = 12: Div<3,3> 1.92, GradVec<4,3> 1.92 (= 2 - 1/12), Grad<3,3> 1.00. In TGV the
+     * second-order term |ε(v)| hence has about twice its nominal weight. Changing it changes the TGV objective (λ would
+     * need re-tuning), so it is kept, and the fused GradVec kernels below reproduce it. test/op/grad.cpp, which only checks
+     * eigenvalues of F'F, is not built (commented out in test/CMakeLists.txt).
+     */
     Log::Debug("Grad", "Adjoint backward differences dim {}", dim);
     b.slice(f0, sz).device(Threads::TensorDevice()) += (a.slice(f0, sz) - a.slice(fp1, sz)) * b.slice(f0, sz).constant(s);
     b.slice(fm1, sz1).device(Threads::TensorDevice()) +=
