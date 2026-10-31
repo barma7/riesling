@@ -233,10 +233,12 @@ template <int FW> struct GFunc<3, FW>
                              Cx3CMap                           y,
                              Cx5Map                            sg)
   {
+    Cx const *const bp = basis->entries(sample, trace); // Once per sample: entry(ib, ...) takes two modulos per call
+    Cx const        bs(basis->scale);
     for (Index ic = 0; ic < y.dimension(0); ic++) {
       Cx const cv = y(ic, sample, trace);
       for (Index ib = 0; ib < basis->nB(); ib++) {
-        Cx const b = std::conj(basis->entry(ib, sample, trace));
+        Cx const b = std::conj(bp[ib] * bs);
         if (b == Cx(0)) continue;
         Cx const bc = b * cv;
         for (Index iz = 0; iz < FW; iz++) {
@@ -261,18 +263,20 @@ template <int FW> struct GFunc<3, FW>
                             Cx5CMap                           sg,
                             Cx3Map                            y)
   {
-    auto const b = basis->entry(sample, trace);
+    Cx const *const bp = basis->entries(sample, trace); // entry(sample, trace) allocated a tensor per sample
+    Cx const        bs(basis->scale);
     for (Index ic = 0; ic < y.dimension(0); ic++) {
       Cx accum = 0.f;
       for (Index ib = 0; ib < basis->nB(); ib++) {
-        if (b(ib) == Cx(0)) continue;
+        Cx const b = bp[ib] * bs;
+        if (b == Cx(0)) continue;
         for (Index iz = 0; iz < FW; iz++) {
           Index const iiz = iz + c[2] - FW / 2;
           for (Index iy = 0; iy < FW; iy++) {
             Index const iiy = iy + c[1] - FW / 2;
             for (Index ix = 0; ix < FW; ix++) {
               Index const iix = ix + c[0] - FW / 2;
-              accum += sg(iix, iiy, iiz, ib, ic) * k(ix, iy, iz) * b(ib);
+              accum += sg(iix, iiy, iiz, ib, ic) * k(ix, iy, iz) * b;
             }
           }
         }

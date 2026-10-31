@@ -6,6 +6,7 @@
 #include "grid-opts.hpp"
 #include "top.hpp"
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 
@@ -35,8 +36,8 @@ private:
   std::vector<std::mutex> mutable mutexes;
   Basis::CPtr basis;
 
-  void forwardTask(Index const start, Index const stride, float const s, CxNCMap<ND + 2> const x, Cx3Map y) const;
-  void adjointTask(Index const start, Index const stride, float const s, Cx3CMap y, CxNMap<ND + 2> x) const;
+  void forwardTask(std::atomic<size_t> &next, float const s, CxNCMap<ND + 2> const x, Cx3Map y) const;
+  void adjointTask(std::atomic<size_t> &next, float const s, Cx3CMap y, CxNMap<ND + 2> x) const;
 };
 
 } // namespace TOps

@@ -51,6 +51,11 @@ auto Basis::entry(Index const b, Index const s, Index const t) const -> Cx
   return B(b, s % B.dimension(1), t % B.dimension(2)) * Cx(scale);
 }
 
+auto Basis::entries(Index const s, Index const t) const -> Cx const *
+{
+  return &B(0, s % B.dimension(1), t % B.dimension(2));
+}
+
 void Basis::write(std::string const &basisFile) const
 {
   HD5::Writer writer(basisFile);
