@@ -100,6 +100,52 @@ TEST_CASE("Grid3", "[op]")
   CHECK((Norm<false>(cart) - Norm<false>(noncart)) / cs == Approx(0.f).margin(2e-4f));
 }
 
+TEST_CASE("Grid3-Basis-Channels", "[op]")
+{
+  Threads::SetGlobalThreadCount(GENERATE(1, 4));
+  Index const M = 24, nC = 3, nS = 16, nT = 8, nB = 3;
+  Re3         points(3, nS, nT);
+  points.setRandom();
+  points = points * (0.45f * M); // Some points near the edge, so the wrapped copies are used too
+  TrajectoryN<3> const traj(points, Sz3{M, M, M});
+
+  Basis basis(nB, 1, nT);
+  basis.B.setRandom();
+  basis.B(1, 0, 0) = 0.f; // Traces 0 and 1 have zero basis entries, which are skipped
+  basis.B(0, 0, 1) = 0.f;
+  basis.B(2, 0, 1) = 0.f;
+
+  auto grid = TOps::Grid<3>::Make(GridOpts<3>{.osamp = 1.3f}, traj, nC, &basis);
+  Cx5  x(grid->ishape), yx(grid->ishape);
+  Cx3  y(grid->oshape), xy(grid->oshape);
+  x.setRandom();
+  y.setRandom();
+  xy = grid->forward(x);
+  yx = grid->adjoint(y);
+  auto const xx = Dot<false>(x, yx);
+  auto const yy = Dot<false>(xy, y);
+  CHECK(std::abs((yy - xx) / (yy + xx)) == Approx(0).margin(1.e-5));
+
+  // Same as gridding each channel and basis vector on its own, without a basis
+  auto      grid1 = TOps::Grid<3>::Make(GridOpts<3>{.osamp = 1.3f}, traj, 1);
+  Sz5 const sz1 = AddBack(FirstN<3>(grid->ishape), 1, 1);
+  Cx3       ref(grid->oshape);
+  ref.setZero();
+  for (Index ic = 0; ic < nC; ic++) {
+    for (Index ib = 0; ib < nB; ib++) {
+      Cx5 const x1 = x.slice(Sz5{0, 0, 0, ib, ic}, sz1);
+      Cx3 const y1 = grid1->forward(x1);
+      for (Index it = 0; it < nT; it++) {
+        for (Index is = 0; is < nS; is++) {
+          ref(ic, is, it) += y1(0, is, it) * basis.entry(ib, is, it);
+        }
+      }
+    }
+  }
+  Cx3 const diff = xy - ref;
+  CHECK(Norm<false>(diff) / Norm<false>(ref) == Approx(0).margin(1.e-5));
+}
+
 TEST_CASE("GridB", "[op]")
 {
   Threads::SetGlobalThreadCount(1);

@@ -4,6 +4,7 @@
 #include "../sys/threads.hpp"
 #include "grid-func.hpp"
 #include "grid-subgrid.hpp"
+#include "grid-transposed.hpp"
 #include "top-impl.hpp"
 
 namespace rl {
@@ -71,6 +72,55 @@ Grid<ND, KF, SG>::Grid(GridOpts<ND> const &opts, TrajectoryN<ND> const &traj, In
 template <int ND, typename KF, int SG> void
 Grid<ND, KF, SG>::forwardTask(std::atomic<size_t> &next, float const s, CxNCMap<ND + 2> const x, Cx3Map y) const
 {
+  if constexpr (ND == 3) { // Transposed subgrid, see grid-transposed.hpp
+    constexpr int   FW = KF::FullWidth;
+    Index const     nB = basis ? basis->nB() : 1, nC = y.dimension(0), nBC = nB * nC;
+    std::vector<Cx> sg(SGFW * SGFW * SGFW * nBC), acc(nBC), b(nB);
+    for (size_t is = next++; is < gridLists.size(); is = next++) {
+      auto const &list = gridLists[is];
+      auto const  corner = SubgridCorner<ND, SGSZ, FW>(list.corner);
+      if (InBounds<ND, SGFW>(corner, FirstN<ND>(x.dimensions()))) {
+        GridT::Load<SGFW, false>(corner, x, sg.data());
+      } else {
+        GridT::Load<SGFW, true>(corner, x, sg.data());
+      }
+      for (auto const &m : list.coords) {
+        typename KType::Tensor const k = kernel(m.offset) * s;
+        if (basis) {
+          Cx const *const bp = basis->entries(m.sample, m.trace);
+          bool            dense = true;
+          for (Index ib = 0; ib < nB; ib++) {
+            b[ib] = bp[ib] * Cx(basis->scale);
+            dense = dense && (b[ib] != Cx(0));
+          }
+          if (dense) {
+            GridT::Gather<FW, SGFW>(m.cart, k, sg.data(), nBC, 0, nBC, acc.data());
+            for (Index ic = 0; ic < nC; ic++) {
+              Cx sum = 0.f;
+              for (Index ib = 0; ib < nB; ib++) {
+                sum += acc[ic + nC * ib] * b[ib];
+              }
+              y(ic, m.sample, m.trace) += sum;
+            }
+          } else {
+            for (Index ib = 0; ib < nB; ib++) {
+              if (b[ib] == Cx(0)) { continue; }
+              GridT::Gather<FW, SGFW>(m.cart, k, sg.data(), nBC, nC * ib, nC, acc.data());
+              for (Index ic = 0; ic < nC; ic++) {
+                y(ic, m.sample, m.trace) += acc[ic] * b[ib];
+              }
+            }
+          }
+        } else {
+          GridT::Gather<FW, SGFW>(m.cart, k, sg.data(), nBC, 0, nC, acc.data());
+          for (Index ic = 0; ic < nC; ic++) {
+            y(ic, m.sample, m.trace) += acc[ic];
+          }
+        }
+      }
+    }
+    return;
+  }
   CxN<ND + 2> sx(AddBack(Constant<ND>(SGFW), basis ? basis->nB() : 1, y.dimension(0)));
   for (size_t is = next++; is < gridLists.size(); is = next++) {
     auto const &list = gridLists[is];
@@ -112,6 +162,54 @@ template <int ND, typename KF, int SG>
 void Grid<ND, KF, SG>::adjointTask(std::atomic<size_t> &next, float const s, Cx3CMap y, CxNMap<ND + 2> x) const
 
 {
+  if constexpr (ND == 3) { // Transposed subgrid, see grid-transposed.hpp
+    constexpr int   FW = KF::FullWidth;
+    Index const     nB = basis ? basis->nB() : 1, nC = y.dimension(0), nBC = nB * nC;
+    std::vector<Cx> sg(SGFW * SGFW * SGFW * nBC), v(nBC), b(nB);
+    for (size_t is = next++; is < gridLists.size(); is = next++) {
+      auto const &list = gridLists[is];
+      std::fill(sg.begin(), sg.end(), Cx(0.f));
+      for (auto const &m : list.coords) {
+        typename KType::Tensor const k = kernel(m.offset) * s;
+        if (basis) {
+          Cx const *const bp = basis->entries(m.sample, m.trace);
+          bool            dense = true;
+          for (Index ib = 0; ib < nB; ib++) {
+            b[ib] = std::conj(bp[ib] * Cx(basis->scale));
+            dense = dense && (b[ib] != Cx(0));
+          }
+          if (dense) {
+            for (Index ib = 0; ib < nB; ib++) {
+              for (Index ic = 0; ic < nC; ic++) {
+                v[ic + nC * ib] = b[ib] * y(ic, m.sample, m.trace);
+              }
+            }
+            GridT::Scatter<FW, SGFW>(m.cart, k, v.data(), nBC, 0, nBC, sg.data());
+          } else {
+            for (Index ib = 0; ib < nB; ib++) {
+              if (b[ib] == Cx(0)) { continue; }
+              for (Index ic = 0; ic < nC; ic++) {
+                v[ic] = b[ib] * y(ic, m.sample, m.trace);
+              }
+              GridT::Scatter<FW, SGFW>(m.cart, k, v.data(), nBC, nC * ib, nC, sg.data());
+            }
+          }
+        } else {
+          for (Index ic = 0; ic < nC; ic++) {
+            v[ic] = y(ic, m.sample, m.trace);
+          }
+          GridT::Scatter<FW, SGFW>(m.cart, k, v.data(), nBC, 0, nC, sg.data());
+        }
+      }
+      auto const corner = SubgridCorner<ND, SGSZ, FW>(list.corner);
+      if (InBounds<ND, SGFW>(corner, FirstN<ND>(x.dimensions()))) {
+        GridT::Store<SGFW, false>(mutexes, corner, sg.data(), x);
+      } else {
+        GridT::Store<SGFW, true>(mutexes, corner, sg.data(), x);
+      }
+    }
+    return;
+  }
   CxN<ND + 2> sx(AddBack(Constant<ND>(SGFW), basis ? basis->nB() : 1, y.dimension(0)));
   for (size_t is = next++; is < gridLists.size(); is = next++) {
     auto const &list = gridLists[is];
