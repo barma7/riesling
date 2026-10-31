@@ -97,6 +97,10 @@ See `denoise`_. The same regularizers are available for ``recon-rlsq``.
 
     The solver for the x update step. ``cg`` (the default) uses Conjugate Gradients on the normal equations of the x update, including the k-space preconditioner weights, so it solves the same problem as ``lsmr``. It only needs vectors the size of the image, which uses considerably less memory than LSMR on the stacked system (where every vector also holds all regularizer outputs), and its warm start needs no extra pass of the encoding operator. ``lsmr`` is the previous default.
 
+* ``--split-time``
+
+    Solve each time point (e.g. echo) as its own ADMM problem, one after the other. When the regularizers do not couple time points (no ``t`` in ``--iso``, no ``--tvt`` or ``--llr``, no wavelets over the time dimension) the problem is a sum of independent problems, so the solution is the same, but only one time point's ADMM state is in memory at a time. The data scale is computed from all time points together, as without this option. Each time point gets its own ADMM penalty and stopping test. Only for ADMM.
+
 * ``--max-outer-its=N``
 
     The maximum number of ADMM iterations. The default is 20 but a higher number (50 or more) may be required for optimal image quality.
