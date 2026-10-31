@@ -8,6 +8,53 @@
 
 namespace rl::TOps {
 
+namespace {
+/*
+ * x(v, b) (+)= s * sum_c y(v, b, c) * conj(maps(v, b or 0, c)), v = flattened voxel index.
+ * Replaces an Eigen reduction over the outermost (channel) dimension, which ran ~10x slower than
+ * memory bandwidth allows. Works on blocks of voxels so that the block of maps stays in cache
+ * while all basis images use it. Complex products are written out in real arithmetic, so they
+ * vectorise without fast-math.
+ */
+template <bool accumulate>
+void SENSEAdjoint(Cx const *y, Cx const *maps, Cx *x, Index const N, Index const nB, Index const nMB, Index const nC,
+                  float const s)
+{
+  constexpr Index block = 2048;
+  Threads::ChunkFor(
+    [&](Index const lo, Index const hi) {
+      std::vector<float> acc(2 * block);
+      for (Index v0 = lo; v0 < hi; v0 += block) {
+        Index const n = std::min(block, hi - v0);
+        for (Index ib = 0; ib < nB; ib++) {
+          std::fill_n(acc.data(), 2 * n, 0.f);
+          Index const mb = (nMB == 1) ? 0 : ib;
+          for (Index ic = 0; ic < nC; ic++) {
+            float const *__restrict yp = reinterpret_cast<float const *>(y + v0 + N * (ib + nB * ic));
+            float const *__restrict mp = reinterpret_cast<float const *>(maps + v0 + N * (mb + nMB * ic));
+            float *__restrict a = acc.data();
+            for (Index iv = 0; iv < n; iv++) {
+              float const yr = yp[2 * iv], yi = yp[2 * iv + 1], mr = mp[2 * iv], mi = mp[2 * iv + 1];
+              a[2 * iv] += yr * mr + yi * mi;
+              a[2 * iv + 1] += yi * mr - yr * mi;
+            }
+          }
+          float *__restrict xp = reinterpret_cast<float *>(x + v0 + N * ib);
+          float const *__restrict a = acc.data();
+          for (Index iv = 0; iv < 2 * n; iv++) {
+            if constexpr (accumulate) {
+              xp[iv] += s * a[iv];
+            } else {
+              xp[iv] = s * a[iv];
+            }
+          }
+        }
+      }
+    },
+    N);
+}
+} // namespace
+
 auto SENSEOp::Make(Cx5 const &maps, Index const nB) -> Ptr { return std::make_shared<SENSEOp>(maps, nB); }
 
 SENSEOp::SENSEOp(Cx5 const &maps, Index const nB)
@@ -51,14 +98,16 @@ void SENSEOp::iforward(InCMap x, OutMap y, float const s) const
 void SENSEOp::adjoint(OutCMap y, InMap x, float const s) const
 {
   auto const time = this->startAdjoint(y, x, false);
-  x.device(Threads::TensorDevice()) = (y * maps_.broadcast(brdMaps).conjugate()).sum(Sz1{4}) * x.constant(s);
+  SENSEAdjoint<false>(y.data(), maps_.data(), x.data(), Product(FirstN<3>(ishape)), ishape[3], maps_.dimension(3),
+                      oshape[4], s);
   this->finishAdjoint(x, time, false);
 }
 
 void SENSEOp::iadjoint(OutCMap y, InMap x, float const s) const
 {
   auto const time = this->startAdjoint(y, x, true);
-  x.device(Threads::TensorDevice()) += (y * maps_.broadcast(brdMaps).conjugate()).sum(Sz1{4}) * x.constant(s);
+  SENSEAdjoint<true>(y.data(), maps_.data(), x.data(), Product(FirstN<3>(ishape)), ishape[3], maps_.dimension(3),
+                     oshape[4], s);
   this->finishAdjoint(x, time, true);
 }
 
