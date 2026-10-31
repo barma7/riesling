@@ -153,8 +153,8 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
         Log::Tensor(fmt::format("admm-x-{:02d}", ii), shape, xx.data(), HD5::Dims::Images);
       }
     };
-    ADMM::DebugZ debug_z = [&, di = debugIters.Get()](Index const ii, Index const ir, ADMM::Vector const &Fx,
-                                                      ADMM::Vector const &z, ADMM::Vector const &u) {
+    ADMM::DebugZ debug_z = [&, di = debugIters.Get()](Index const ii, Index const ir, ADMM::CMap const Fx, ADMM::CMap const z,
+                                                      ADMM::CMap const u) {
       if (Log::IsDebugging() && debugZ && (ii % di == 0)) {
         if (std::holds_alternative<Sz5>(reg[ir].shape)) {
           auto const Fshape = std::get<Sz5>(reg[ir].shape);

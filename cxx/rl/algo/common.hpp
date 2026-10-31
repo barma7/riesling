@@ -95,7 +95,15 @@ inline auto ParallelNorm(Eigen::MatrixBase<Derived> const &v) -> typename Eigen:
       Index const hi = (ic + 1) * den + std::min(ic + 1, rem);
       Index const n = hi - lo;
       Threads::GlobalPool()->Schedule([&v, &norms, &barrier, ic, lo, n] {
-        norms[ic] = v.segment(lo, n).stableNorm();
+        /* Sum of squares over blocks, each block in float (vectorised) and the blocks in double: ~3x faster than
+         * stableNorm, which rescales to avoid overflow. If a block's sum overflows, use stableNorm after all.
+         */
+        constexpr Index blk = 1024;
+        double          ss = 0.;
+        for (Index ib = 0; ib < n; ib += blk) {
+          ss += v.segment(lo + ib, std::min(blk, n - ib)).squaredNorm();
+        }
+        norms[ic] = std::isfinite(ss) ? static_cast<float>(std::sqrt(ss)) : v.segment(lo, n).stableNorm();
         barrier.Notify();
       });
     }

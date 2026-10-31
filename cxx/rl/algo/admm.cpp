@@ -84,13 +84,34 @@ auto ADMM::run(CMap b) const -> Vector
     bʹ.head(A->rows()).device(dev) = b;
   }
 
-  auto cgUpdate = [&](Index const imax) {
-    Index const cols = A->cols();
-    Index       maxRows = 0;
-    for (auto const &rg : regs) {
-      if (rg.T) { maxRows = std::max(maxRows, rg.T->rows()); }
+  /* Work vectors in one allocation, made once: the CG x-update and the z/u-update use the same memory one after the other.
+   * Fresh allocations every outer iteration cost page faults (the kernel zeroes each page on its first write), and
+   * separate ones for the two phases would add up in memory.
+   */
+  Index const cols = A->cols();
+  Index       maxT = 0, maxZ = 0; // Largest F_i x, largest z_i
+  for (auto const &rg : regs) {
+    if (rg.T) { maxT = std::max(maxT, rg.T->rows()); }
+    maxZ = std::max(maxZ, rg.T ? rg.T->rows() : cols);
+  }
+  auto const  pad = [](Index const n) { return (n + 15) / 16 * 16; }; // Keeps each vector aligned for Map
+  Index const cgSize = opts.cg ? 4 * pad(cols) + pad(A->rows()) + (Minv ? pad(A->rows()) : 0) + pad(maxT) : 0;
+  Index const zuSize = 2 * pad(maxZ) + pad(cols);
+  Vector      work;
+  auto const  carve = [&work, &pad](std::initializer_list<Index> const sizes) { // Consecutive vectors in work
+    std::vector<Map> v;
+    Index            offset = 0;
+    for (Index const n : sizes) {
+      v.emplace_back(work.data() + offset, n);
+      offset += pad(n);
     }
-    Vector r(cols), p(cols), Ap(cols), Gp(cols), yA(A->rows()), yW(Minv ? A->rows() : 0), t(maxRows);
+    return v;
+  };
+  if (opts.cg) { work.resize(std::max(cgSize, zuSize)); }
+
+  auto cgUpdate = [&](Index const imax) {
+    auto v = carve({cols, cols, cols, cols, A->rows(), Minv ? A->rows() : 0, maxT});
+    Map &r = v[0], &p = v[1], &Ap = v[2], &Gp = v[3], &yA = v[4], &yW = v[5], &t = v[6];
     // r = Aᴴ W b - q + ρ Σ F_iᴴ (z_i - u_i - F_i x)
     r.device(dev) = AhWb - q;
     for (Index ir = 0; ir < R; ir++) {
@@ -109,12 +130,12 @@ auto ADMM::run(CMap b) const -> Vector
     Log::Print("CG", "00 {:4.3E}", std::sqrt(rr));
     for (Index ii = 0; ii < imax; ii++) {
       // Ap = Aᴴ W A p, Gp = ρ Σ F_iᴴ F_i p
-      A->forward(p, yA);
+      A->forward(CMap(p.data(), cols), yA);
       if (Minv) {
-        Minv->forward(yA, yW);
-        A->adjoint(yW, Ap);
+        Minv->forward(CMap(yA.data(), yA.size()), yW);
+        A->adjoint(CMap(yW.data(), yW.size()), Ap);
       } else {
-        A->adjoint(yA, Ap);
+        A->adjoint(CMap(yA.data(), yA.size()), Ap);
       }
       for (Index ir = 0; ir < R; ir++) {
         if (regs[ir].T) {
@@ -168,46 +189,58 @@ auto ADMM::run(CMap b) const -> Vector
     }
     if (debug_x) { debug_x(io, x); }
 
+    if (!opts.cg) { work.resize(zuSize); } // LSMR has its own vectors: only hold these while updating z and u
     float normFx = 0.f, normz = 0.f, normu = 0.f, pRes = 0.f, dRes = 0.f;
     for (Index ir = 0; ir < R; ir++) {
-      float  nz, nu, nP, nD;
-      Vector zprev(z[ir].size());
-      zprev.device(dev) = z[ir];
+      float       nz, nu, nP, nD;
+      Index const sz = z[ir].size();
+      /* w = u + F x (relaxed), then the new z in place (prox); Fx = F x, then z_new - z_old; Fh = Fᴴ(...) for the
+       * residuals. The old z stays in z[ir] until the end, so no copy of it is needed. Same arithmetic as updating u
+       * in place: (u + Fx) is rounded once either way.
+       */
+      auto zv = carve({sz, sz, cols});
+      Map &w = zv[0], &Fx = zv[1], &Fh = zv[2];
       // Note that in the Boyd primer relaxation is defined as ɑ * Ax - (1.f - ɑ) * (Bz - c) but this comes from the
       // constraint that Ax + Bz = c Our constraint is Fx = z, which defines A = F and B = -I, and hence the minus sign
       // becomes a plus in this line below, which matches the code examples on Boyd's website
       if (regs[ir].T) {
-        Vector Fx(u[ir].size());
-        regs[ir].T->forward(x, Fx);
+        regs[ir].T->forward(CMap(x.data(), cols), Fx);
         if (opts.ɑ > 0.f) {
-          u[ir].device(dev) += opts.ɑ * Fx + (1.f - opts.ɑ) * zprev;
+          w.device(dev) = u[ir] + (opts.ɑ * Fx + (1.f - opts.ɑ) * z[ir]);
+          regs[ir].P->apply(1.f / ρ, w);
+          u[ir].device(dev) = (u[ir] + (opts.ɑ * Fx + (1.f - opts.ɑ) * z[ir])) - w;
         } else {
-          u[ir].device(dev) += Fx;
+          w.device(dev) = u[ir] + Fx;
+          regs[ir].P->apply(1.f / ρ, w);
+          u[ir].device(dev) = (u[ir] + Fx) - w;
         }
-        z[ir].device(dev) = u[ir];
-        regs[ir].P->apply(1.f / ρ, z[ir]);
-        u[ir].device(dev) = u[ir] - z[ir];
-        if (debug_z) { debug_z(io, ir, Fx, z[ir], u[ir]); }
+        if (debug_z) { debug_z(io, ir, CMap(Fx.data(), sz), CMap(w.data(), sz), CMap(u[ir].data(), sz)); }
         float const nFx = ParallelNorm(Fx);
-        nz = ParallelNorm(z[ir]);
-        nu = ParallelNorm(regs[ir].T->adjoint(u[ir]));
-        nP = ParallelNorm(Fx - z[ir]);
-        nD = ParallelNorm(regs[ir].T->adjoint(z[ir] - zprev));
+        nz = ParallelNorm(w);
+        nP = ParallelNorm(Fx - w);
+        Fx.device(dev) = w - z[ir];
+        z[ir].device(dev) = w;
+        regs[ir].T->adjoint(CMap(u[ir].data(), sz), Fh);
+        nu = ParallelNorm(Fh);
+        regs[ir].T->adjoint(CMap(Fx.data(), sz), Fh);
+        nD = ParallelNorm(Fh);
         Log::Print("ADMM", "Reg {:02d} |Fx| {:3.2E} |z| {:3.2E} |F'u| {:3.2E}", ir, nFx, nz, nu);
       } else {
         if (opts.ɑ > 0.f) {
-          u[ir].device(dev) += opts.ɑ * x + (1.f - opts.ɑ) * zprev;
+          w.device(dev) = u[ir] + (opts.ɑ * x + (1.f - opts.ɑ) * z[ir]);
+          regs[ir].P->apply(1.f / ρ, w);
+          u[ir].device(dev) = (u[ir] + (opts.ɑ * x + (1.f - opts.ɑ) * z[ir])) - w;
         } else {
-          u[ir].device(dev) += x;
+          w.device(dev) = u[ir] + x;
+          regs[ir].P->apply(1.f / ρ, w);
+          u[ir].device(dev) = (u[ir] + x) - w;
         }
-        z[ir].device(dev) = u[ir];
-        regs[ir].P->apply(1.f / ρ, z[ir]);
-        u[ir].device(dev) = u[ir] - z[ir];
-        if (debug_z) { debug_z(io, ir, x, z[ir], u[ir]); }
-        nz = ParallelNorm(z[ir]);
+        if (debug_z) { debug_z(io, ir, CMap(x.data(), sz), CMap(w.data(), sz), CMap(u[ir].data(), sz)); }
+        nz = ParallelNorm(w);
         nu = ParallelNorm(u[ir]);
-        nP = ParallelNorm(x - z[ir]);
-        nD = ParallelNorm(z[ir] - zprev);
+        nP = ParallelNorm(x - w);
+        nD = ParallelNorm(w - z[ir]);
+        z[ir].device(dev) = w;
         Log::Print("ADMM", "Reg {:02d} |z| {:3.2E} |F'u| {:3.2E}", ir, nz, nu);
       }
       normz += nz * nz;
@@ -215,6 +248,7 @@ auto ADMM::run(CMap b) const -> Vector
       pRes += nP * nP;
       dRes += nD * nD;
     }
+    if (!opts.cg) { work.resize(0); }
     float const normx = ParallelNorm(x);
     normz = std::sqrt(normz);
     normu = std::sqrt(normu);

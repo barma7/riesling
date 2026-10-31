@@ -12,7 +12,7 @@ struct ADMM
   using Map = typename Op::Map;
   using CMap = typename Op::CMap;
   using DebugX = std::function<void(Index const, Vector const &)>;
-  using DebugZ = std::function<void(Index const, Index const, Vector const &, Vector const &, Vector const &)>;
+  using DebugZ = std::function<void(Index const, Index const, CMap, CMap, CMap)>; // Maps: no copies of work vectors
 
   struct Opts
   {
