@@ -61,22 +61,111 @@ auto ADMM::run(CMap b) const -> Vector
   Vector x(A->cols());
   x.setZero();
 
-  Vector bʹ(Aʹ->rows());
-  bʹ.setZero();
-  bʹ.head(A->rows()).device(dev) = b;
+  /* LSMR solves the x-update on the stacked system above, with right-hand side bʹ. CG instead solves its normal equations
+   *   (Aᴴ W A + ρ Σ F_iᴴ F_i) x = Aᴴ W b + ρ Σ F_iᴴ (z_i - u_i)
+   * where W is the k-space weighting (Minv), the same minimiser. It only needs vectors of the size of x, and keeps
+   * q = Aᴴ W A x up to date from the products it computes anyway, so the warm start costs no extra pass of A.
+   */
+  Vector bʹ, AhWb, q;
+  if (opts.cg) {
+    Log::Print("ADMM", "x-update: CG on the normal equations");
+    Vector Wb(A->rows());
+    if (Minv) {
+      Minv->forward(b, Map(Wb.data(), Wb.size()));
+    } else {
+      Wb.device(dev) = b;
+    }
+    AhWb = A->adjoint(Wb);
+    q.resize(A->cols());
+    q.setZero(); // x = 0
+  } else {
+    bʹ.resize(Aʹ->rows());
+    bʹ.setZero();
+    bʹ.head(A->rows()).device(dev) = b;
+  }
+
+  auto cgUpdate = [&](Index const imax) {
+    Index const cols = A->cols();
+    Index       maxRows = 0;
+    for (auto const &rg : regs) {
+      if (rg.T) { maxRows = std::max(maxRows, rg.T->rows()); }
+    }
+    Vector r(cols), p(cols), Ap(cols), Gp(cols), yA(A->rows()), yW(Minv ? A->rows() : 0), t(maxRows);
+    // r = Aᴴ W b - q + ρ Σ F_iᴴ (z_i - u_i - F_i x)
+    r.device(dev) = AhWb - q;
+    for (Index ir = 0; ir < R; ir++) {
+      if (regs[ir].T) {
+        Map tm(t.data(), regs[ir].T->rows());
+        regs[ir].T->forward(CMap(x.data(), cols), tm);
+        tm.device(dev) = (z[ir] - u[ir] - tm) * ρ;
+        regs[ir].T->iadjoint(CMap(t.data(), tm.size()), Map(r.data(), cols));
+      } else {
+        r.device(dev) += (z[ir] - u[ir] - x) * ρ;
+      }
+    }
+    p.device(dev) = r;
+    float rr = CheckedDot(r, r);
+    Log::Print("CG", "IT |r|       α         |x|");
+    Log::Print("CG", "00 {:4.3E}", std::sqrt(rr));
+    for (Index ii = 0; ii < imax; ii++) {
+      // Ap = Aᴴ W A p, Gp = ρ Σ F_iᴴ F_i p
+      A->forward(p, yA);
+      if (Minv) {
+        Minv->forward(yA, yW);
+        A->adjoint(yW, Ap);
+      } else {
+        A->adjoint(yA, Ap);
+      }
+      for (Index ir = 0; ir < R; ir++) {
+        if (regs[ir].T) {
+          Map tm(t.data(), regs[ir].T->rows());
+          regs[ir].T->forward(CMap(p.data(), cols), tm);
+          tm.device(dev) = tm * ρ;
+          if (ir == 0) {
+            regs[ir].T->adjoint(CMap(t.data(), tm.size()), Map(Gp.data(), cols));
+          } else {
+            regs[ir].T->iadjoint(CMap(t.data(), tm.size()), Map(Gp.data(), cols));
+          }
+        } else if (ir == 0) {
+          Gp.device(dev) = p * ρ;
+        } else {
+          Gp.device(dev) += p * ρ;
+        }
+      }
+      // pᴴ N p is real for the Hermitian N; its imaginary part is rounding only, so take the real part
+      float const pNp = std::real(ParallelDot(p, Ap)) + std::real(ParallelDot(p, Gp));
+      if (!(pNp > 0.f)) {
+        Log::Print("CG", "pᴴNp {} is not positive, stopping", pNp);
+        break;
+      }
+      float const α = rr / pNp;
+      x.device(dev) = x + p * α;
+      q.device(dev) = q + Ap * α;
+      r.device(dev) = r - (Ap + Gp) * α;
+      float const rrNew = CheckedDot(r, r);
+      p.device(dev) = r + p * (rrNew / rr);
+      rr = rrNew;
+      Log::Print("CG", "{:02d} {:4.3E} {:4.3E} {:4.3E}", ii + 1, std::sqrt(rr), α, ParallelNorm(x));
+      if (rr == 0.f) { break; }
+    }
+  };
 
   Log::Print("ADMM", "Abs ε {}", opts.ε);
   Iterating::Starting();
   for (Index io = 0; io < opts.outerLimit; io++) {
-    Index start = A->rows();
-    for (Index ir = 0; ir < R; ir++) {
-      Index rr = regs[ir].T ? regs[ir].T->rows() : A->cols();
-      bʹ.segment(start, rr).device(dev) = std::sqrt(ρ) * (z[ir] - u[ir]);
-      start += rr;
-      ρdiags[ir]->scale = std::sqrt(ρ);
+    if (opts.cg) {
+      cgUpdate(io == 0 ? opts.iters0 : opts.iters1);
+    } else {
+      Index start = A->rows();
+      for (Index ir = 0; ir < R; ir++) {
+        Index rr = regs[ir].T ? regs[ir].T->rows() : A->cols();
+        bʹ.segment(start, rr).device(dev) = std::sqrt(ρ) * (z[ir] - u[ir]);
+        start += rr;
+        ρdiags[ir]->scale = std::sqrt(ρ);
+      }
+      x = lsmr.run(bʹ, x);
+      lsmr.opts.imax = opts.iters1;
     }
-    x = lsmr.run(bʹ, x);
-    lsmr.opts.imax = opts.iters1;
     if (debug_x) { debug_x(io, x); }
 
     float normFx = 0.f, normz = 0.f, normu = 0.f, pRes = 0.f, dRes = 0.f;

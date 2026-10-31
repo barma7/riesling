@@ -96,11 +96,15 @@ ADMMArgs::ADMMArgs(args::Subparser &parser)
   , μ(parser, "μ", "Residual balancing tolerance (default 1.2)", {"mu"}, 1.2f)
   , τ(parser, "τ", "Residual balancing ratio limit (default 10)", {"tau"}, 10.f)
   , ɑ(parser, "ɑ", "Over-relaxation parameter (choose 1<ɑ<2)", {"alpha"}, 0.f)
+  , inner(parser, "S", "ADMM x-update solver (lsmr/cg)", {"admm-inner"}, "lsmr")
 {
 }
 
 auto ADMMArgs::Get() -> rl::ADMM::Opts
 {
+  if (inner.Get() != "lsmr" && inner.Get() != "cg") {
+    throw rl::Log::Failure("ADMM", "--admm-inner must be lsmr or cg, not {}", inner.Get());
+  }
   return rl::ADMM::Opts{.iters0 = in_its0.Get(),
                         .iters1 = in_its1.Get(),
                         .aTol = atol.Get(),
@@ -112,7 +116,8 @@ auto ADMMArgs::Get() -> rl::ADMM::Opts
                         .balance = !ρ,
                         .μ = μ.Get(),
                         .τmax = τ.Get(),
-                        .ɑ = ɑ.Get()};
+                        .ɑ = ɑ.Get(),
+                        .cg = inner.Get() == "cg"};
 }
 
 template <int ND> SENSEArgs<ND>::SENSEArgs(args::Subparser &parser)

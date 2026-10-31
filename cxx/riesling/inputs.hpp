@@ -92,6 +92,8 @@ struct ADMMArgs
 
   args::ValueFlag<float> ɑ;
 
+  args::ValueFlag<std::string> inner;
+
   ADMMArgs(args::Subparser &parser);
   auto Get() -> rl::ADMM::Opts;
 };
