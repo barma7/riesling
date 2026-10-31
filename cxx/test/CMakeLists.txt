@@ -21,6 +21,7 @@ if(${BUILD_TESTS})
         op/pad.cpp
         op/recon.cpp
         op/sense.cpp
+        op/sense-nufft.cpp
         op/wavelets.cpp
     )
     target_link_libraries(riesling-tests PUBLIC

@@ -66,6 +66,7 @@ op/pad.cpp
 op/recon.cpp
 op/reshape.cpp
 op/sense.cpp
+op/sense-nufft.cpp
 op/top-id.cpp
 op/wavelets.cpp
 

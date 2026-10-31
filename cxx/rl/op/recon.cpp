@@ -9,6 +9,7 @@
 #include "nufft-lowmem.hpp"
 #include "nufft.hpp"
 #include "reshape.hpp"
+#include "sense-nufft.hpp"
 #include "sense.hpp"
 
 namespace rl {
@@ -93,10 +94,10 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
         M = MakeKSpacePrecon(pOpts, gridOpts, traj, b, nChan, Sz2{nSlab, nTime});
       }
     } else {
-      auto sense =
-        TOps::MakeSENSE(SENSE::KernelsToMaps<ND>(skern, traj.matrixForFOV(gridOpts.fov), gridOpts.osamp), b ? b->nB() : 1);
-      auto nufft = TOps::MakeNUFFT(gridOpts, traj, sense->nChannels(), b);
       if constexpr (ND == 2) {
+        auto sense =
+          TOps::MakeSENSE(SENSE::KernelsToMaps<ND>(skern, traj.matrixForFOV(gridOpts.fov), gridOpts.osamp), b ? b->nB() : 1);
+        auto nufft = TOps::MakeNUFFT(gridOpts, traj, sense->nChannels(), b);
         auto slices = TOps::MakeLoop<2, 3>(nufft, nSlab);
         auto ss = TOps::MakeCompose(sense, slices);
         auto time = TOps::MakeLoop<4, 4>(ss, nTime);
@@ -106,7 +107,10 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
         if (nSlab > 1) {
           throw(Log::Failure("Recon", "Not supported right now"));
         } else {
-          auto NS = TOps::MakeCompose(sense, nufft);
+          // Same operator as Compose(SENSEOp, NUFFT), without the channel images in between
+          Cx5 const maps = SENSE::KernelsToMaps<ND>(skern, traj.matrixForFOV(gridOpts.fov), gridOpts.osamp);
+          M = MakeKSpacePrecon(pOpts, gridOpts, traj, b, maps, Sz2{nSlab, nTime});
+          auto NS = TOps::MakeSENSENUFFT(gridOpts, traj, maps, b);
           if (nTime > 1) {
             auto NS2 = TOps::MakeReshapeOutput(NS, AddBack(NS->oshape, 1));
             A = TOps::MakeLoop<4, 4>(NS2, nTime);
@@ -114,7 +118,6 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
             auto NS2 = TOps::MakeReshapeOutput(NS, AddBack(NS->oshape, 1, 1));
             A = TOps::MakeReshapeInput(NS2, AddBack(NS2->ishape, 1));
           }
-          M = MakeKSpacePrecon(pOpts, gridOpts, traj, b, sense->maps(), Sz2{nSlab, nTime});
         }
       }
     }
