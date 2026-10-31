@@ -1,0 +1,4 @@
+# Local build tree (bootstrap.sh)
+/build/
+# vcpkg clone made by bootstrap.sh when vcpkg is not installed
+/.vcpkg/
