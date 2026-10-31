@@ -13,6 +13,7 @@ if(${BUILD_TESTS})
         prox.cpp
         op/fft.cpp
         # op/grad.cpp
+        op/grad-fused.cpp
         op/grid.cpp
         # op/ndft.cpp
         op/nufft.cpp
