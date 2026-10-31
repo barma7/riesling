@@ -33,7 +33,7 @@ struct ADMM
 
     float ɑ = 0.f; // Over-relaxation parameter, set 1 < ɑ < 2
 
-    bool cg = false; // x-update with CG on the normal equations instead of LSMR on the stacked system
+    bool cg = true; // x-update with CG on the normal equations; false: LSMR on the stacked system
   };
 
   Op::Ptr                  A;    // Forward model

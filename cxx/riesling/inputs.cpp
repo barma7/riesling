@@ -96,7 +96,7 @@ ADMMArgs::ADMMArgs(args::Subparser &parser)
   , μ(parser, "μ", "Residual balancing tolerance (default 1.2)", {"mu"}, 1.2f)
   , τ(parser, "τ", "Residual balancing ratio limit (default 10)", {"tau"}, 10.f)
   , ɑ(parser, "ɑ", "Over-relaxation parameter (choose 1<ɑ<2)", {"alpha"}, 0.f)
-  , inner(parser, "S", "ADMM x-update solver (lsmr/cg)", {"admm-inner"}, "lsmr")
+  , inner(parser, "S", "ADMM x-update solver (cg/lsmr, default cg)", {"admm-inner"}, "cg")
 {
 }
 

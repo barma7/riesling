@@ -91,7 +91,11 @@ See `denoise`_. The same regularizers are available for ``recon-rlsq``.
 
 * ``--max-its1=N``, ``--max-its0=N``--atol=A``, ``--btol=B``, ``--ctol=C``
 
-    These control the inner optimization for ADMM (the x update step), which is solved with LSMR. As this step is warm-started, it is possible to control the maximum number of iterations for the zeroth and subsequent steps independently.
+    These control the inner optimization for ADMM (the x update step). As this step is warm-started, it is possible to control the maximum number of iterations for the zeroth and subsequent steps independently. The tolerances only apply to LSMR.
+
+* ``--admm-inner=cg/lsmr``
+
+    The solver for the x update step. ``cg`` (the default) uses Conjugate Gradients on the normal equations of the x update, including the k-space preconditioner weights, so it solves the same problem as ``lsmr``. It only needs vectors the size of the image, which uses considerably less memory than LSMR on the stacked system (where every vector also holds all regularizer outputs), and its warm start needs no extra pass of the encoding operator. ``lsmr`` is the previous default.
 
 * ``--max-outer-its=N``
 
