@@ -28,7 +28,7 @@ auto ADMM::run(CMap b) const -> Vector
     u_i = F_i * x + u_{i-1} - z_i
     */
   if (b.rows() != A->rows()) { throw Log::Failure("ADMM", "b was size {} expected {}", b.rows(), A->rows()); }
-  auto const dev = Threads::CoreDevice();
+  auto &dev = Threads::CoreDevice(); // Not const: Eigen ignores a const device and evaluates on one thread
 
   Index const                                  R = regs.size();
   std::vector<Vector>                          z(R), u(R);
