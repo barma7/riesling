@@ -1,5 +1,7 @@
 #include "rl/log/log.hpp"
 #include "rl/prox/norms.hpp"
+#include "rl/sys/threads.hpp"
+#include "rl/tensors.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -158,4 +160,49 @@ TEST_CASE("ConjSoS", "[prox]")
   rc->apply(α, ca);
   INFO("zc " << zc.transpose() << "\nca " << ca.transpose() << "\n");
   CHECK((zc - ca).norm() == Approx(0.f).margin(1.e-6f));
+}
+TEST_CASE("L2Prox-blocks", "[prox]")
+{
+  // Norms over basis (dim 3) and gradient (dim 5) components per voxel and time, as for TGV with --iso=bg
+  Threads::SetGlobalThreadCount(GENERATE(1, 4));
+  Sz6 const   sh{7, 5, 4, 3, 2, 3};
+  float const λ = 2.f, α = 0.5f;
+  auto        prox = rl::Proxs::L2<6, 2>::Make(λ, sh, Sz2{3, 5});
+  Cx6         x(sh);
+  x.setRandom();
+  auto ref = [&](bool const conj) {
+    Cx6 r = x;
+    for (Index it = 0; it < sh[4]; it++) {
+      for (Index k = 0; k < sh[2]; k++) {
+        for (Index j = 0; j < sh[1]; j++) {
+          for (Index i = 0; i < sh[0]; i++) {
+            float n2 = 0.f;
+            for (Index ig = 0; ig < sh[5]; ig++) {
+              for (Index ib = 0; ib < sh[3]; ib++) {
+                n2 += std::norm(x(i, j, k, ib, it, ig));
+              }
+            }
+            float const n = std::sqrt(n2), t = α * λ;
+            float const f = conj ? (n > λ ? λ / n : 1.f) : (n > t ? 1.f - t / n : 0.f);
+            for (Index ig = 0; ig < sh[5]; ig++) {
+              for (Index ib = 0; ib < sh[3]; ib++) {
+                r(i, j, k, ib, it, ig) *= f;
+              }
+            }
+          }
+        }
+      }
+    }
+    return r;
+  };
+  Cx6 z = x;
+  prox->apply(α, rl::Proxs::Prox::Map(z.data(), z.size()));
+  Cx6 const za = ref(false);
+  Cx6 const da = z - za;
+  CHECK(Norm<false>(da) / Norm<false>(za) == Approx(0.f).margin(1.e-6f));
+  z = x;
+  prox->conj(α, rl::Proxs::Prox::Map(z.data(), z.size()));
+  Cx6 const zc = ref(true);
+  Cx6 const dc = z - zc;
+  CHECK(Norm<false>(dc) / Norm<false>(zc) == Approx(0.f).margin(1.e-6f));
 }
