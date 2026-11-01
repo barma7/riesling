@@ -30,5 +30,6 @@ template <int ND> struct Recon
         Cx5 const             &data,
         Re3 const             &f0map);
   TOps::TOp<5, 5>::Ptr A, M;
+  TOps::TOp<5, 5>::Ptr N; // Aᴴ M A as one operator (--gpu), else nullptr
 };
 } // namespace rl

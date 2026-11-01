@@ -67,6 +67,7 @@ op/recon.cpp
 op/reshape.cpp
 op/sense.cpp
 op/sense-nufft.cpp
+op/sense-nufft-gpu.cpp
 op/top-id.cpp
 op/wavelets.cpp
 
@@ -209,6 +210,13 @@ target_link_libraries(rl PUBLIC
     NIFTI::niftiio
     scn::scn
 )
+if(RL_CUDA)
+    target_sources(rl PRIVATE gpu/snufft.cu)
+    target_compile_definitions(rl PUBLIC RL_CUDA)
+    target_link_libraries(rl PUBLIC CUDA::cudart_static CUDA::cufft)
+    set_target_properties(rl PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+    set_source_files_properties(gpu/snufft.cu PROPERTIES COMPILE_OPTIONS "-O3;-lineinfo")
+endif()
 set_target_properties(rl PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON

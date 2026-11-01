@@ -1,4 +1,4 @@
-add_compile_options(-finput-charset=UTF-8)
+add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-finput-charset=UTF-8>") # CXX only: nvcc rejects it
 cmake_minimum_required(VERSION 3.13)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_LIST_DIR}/cmake)
 include(CheckCXXCompilerFlag)
@@ -13,7 +13,7 @@ if(LINUX)
 endif()
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF) # Why not? Because it takes forever, that's why
 # Deal with stupid complex ABI warnings from GCC 4.4 onwards
-add_compile_options("$<$<CXX_COMPILER_ID:GNU>:-Wno-psabi>")
+add_compile_options("$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU>>:-Wno-psabi>")
 # Deal with GCC 8 and std::filesystem
 # Thanks to Deniz Bahadir on the CMake Discourse
 add_link_options("$<$<CXX_COMPILER_ID:GNU>:LINKER:--as-needed>")
@@ -24,6 +24,16 @@ if(BUILD_MERLIN)
 endif()
 project(riesling LANGUAGES CXX)
 include(Version)
+# Optional GPU (CUDA) SENSE + NUFFT operator (recon --gpu). Needs nvcc and cuFFT; off by default.
+option(RL_CUDA "Build the CUDA SENSE + NUFFT operator" OFF)
+if(RL_CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  message(STATUS "CUDA ${CUDAToolkit_VERSION}, architectures ${CMAKE_CUDA_ARCHITECTURES}")
+endif()
 # Optional CPU-specific build. Empty (default) keeps the portable baseline x86-64 build.
 # native = this machine only, x86-64-v3 = AVX2+FMA, x86-64-v4 = AVX-512
 set(RL_ARCH "" CACHE STRING "Value for -march (native, x86-64-v3, x86-64-v4); empty for compiler default")

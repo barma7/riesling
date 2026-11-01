@@ -38,7 +38,7 @@ template <int ND> struct GridArgs
 
 struct ReconArgs
 {
-  args::Flag decant, lowmem;
+  args::Flag decant, lowmem, gpu;
 
   ReconArgs(args::Subparser &parser);
   auto Get() -> rl::ReconOpts;

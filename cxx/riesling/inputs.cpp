@@ -43,10 +43,14 @@ template struct GridArgs<3>;
 ReconArgs::ReconArgs(args::Subparser &parser)
   : decant(parser, "D", "Direct Virtual Coil (SENSE via convolution)", {"decant"})
   , lowmem(parser, "L", "Low memory mode", {"lowmem", 'l'})
+  , gpu(parser, "G", "SENSE + NUFFT on a CUDA GPU (3D, one slab)", {"gpu"})
 {
 }
 
-auto ReconArgs::Get() -> rl::ReconOpts { return rl::ReconOpts{.decant = decant.Get(), .lowmem = lowmem.Get()}; }
+auto ReconArgs::Get() -> rl::ReconOpts
+{
+  return rl::ReconOpts{.decant = decant.Get(), .lowmem = lowmem.Get(), .gpu = gpu.Get()};
+}
 
 PreconArgs::PreconArgs(args::Subparser &parser)
   : type(parser, "P", "Preconditioner (none/single/multi/filename)", {"precon", 'p'}, "single")

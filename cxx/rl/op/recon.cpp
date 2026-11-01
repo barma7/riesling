@@ -9,6 +9,7 @@
 #include "nufft-lowmem.hpp"
 #include "nufft.hpp"
 #include "reshape.hpp"
+#include "sense-nufft-gpu.hpp"
 #include "sense-nufft.hpp"
 #include "sense.hpp"
 
@@ -74,6 +75,10 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
   Index const nChan = noncart.dimension(0);
   Index const nSlab = noncart.dimension(3);
   Index const nTime = noncart.dimension(4);
+  if (rOpts.gpu && (ND != 3 || nChan == 1 || nSlab > 1 || rOpts.decant || rOpts.lowmem)) {
+    throw Log::Failure("Recon",
+                       "--gpu is only implemented for 3D multi-channel recons with one slab, without --decant/--lowmem");
+  }
   if (nChan == 1) {
     A = Single(gridOpts, traj, nSlab, nTime, b);
     M = MakeKSpacePrecon(pOpts, gridOpts, traj, b, 1, Sz2{nSlab, nTime});
@@ -110,6 +115,19 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
           // Same operator as Compose(SENSEOp, NUFFT), without the channel images in between
           Cx5 const maps = SENSE::KernelsToMaps<ND>(skern, traj.matrixForFOV(gridOpts.fov), gridOpts.osamp);
           M = MakeKSpacePrecon(pOpts, gridOpts, traj, b, maps, Sz2{nSlab, nTime});
+          if (rOpts.gpu) { // Same operator on the GPU, and Aᴴ M A in one device pass
+            auto NS = TOps::MakeSENSENUFFTGPU(gridOpts, traj, maps, b, TOps::KSpaceWeights(M));
+            auto NN = NS->normal();
+            if (nTime > 1) {
+              A = TOps::MakeLoop<4, 4>(TOps::MakeReshapeOutput(NS, AddBack(NS->oshape, 1)), nTime);
+              N = TOps::MakeLoop<4, 4>(NN, nTime);
+            } else {
+              auto NS2 = TOps::MakeReshapeOutput(NS, AddBack(NS->oshape, 1, 1));
+              A = TOps::MakeReshapeInput(NS2, AddBack(NS2->ishape, 1));
+              N = TOps::MakeReshapeOutput(TOps::MakeReshapeInput(NN, AddBack(NN->ishape, 1)), AddBack(NN->oshape, 1));
+            }
+            return;
+          }
           auto NS = TOps::MakeSENSENUFFT(gridOpts, traj, maps, b);
           if (nTime > 1) {
             auto NS2 = TOps::MakeReshapeOutput(NS, AddBack(NS->oshape, 1));
@@ -133,6 +151,7 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
                                    Cx5 const             &noncart,
                                    Re3 const             &f0map)
 {
+  if (rOpts.gpu) { throw Log::Failure("Recon", "--gpu does not support off-resonance correction"); }
   Index const nSamp = noncart.dimension(1);
   Index const nSlice = noncart.dimension(3);
   Index const nTime = noncart.dimension(4);
