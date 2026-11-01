@@ -184,9 +184,11 @@ __global__ void DualK(Vol const g, Coef const c, float2 const *__restrict__ xh, 
   }
 }
 
-// X += a Tᴴ y. One thread per element of x (Identity, Grad, GradT, TGV1), or per voxel and (b, t) for TGV2's v
+// X += Tᴴ y, scaled by a on x and by av on v. One thread per element of x (Identity, Grad, GradT, TGV1), or per voxel and
+// (b, t) for TGV2's v
 template <Transform T>
-__global__ void AdjK(Vol const g, Coef const c, float2 const *__restrict__ y, float2 *__restrict__ X, float const a)
+__global__ void AdjK(Vol const g, Coef const c, float2 const *__restrict__ y, float2 *__restrict__ X, float const a,
+                     float const av)
 {
   long long const e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   if (e >= g.nI) { return; }
@@ -209,7 +211,7 @@ __global__ void AdjK(Vol const g, Coef const c, float2 const *__restrict__ y, fl
         long long const  at = g.off(i, j, k, bt, d);
         float2 const     yy = y[at];
         float2          &xv = X[g.nI + at];
-        xv = make_float2(fmaf(-a, yy.x, xv.x), fmaf(-a, yy.y, xv.y));
+        xv = make_float2(fmaf(-av, yy.x, xv.x), fmaf(-av, yy.y, xv.y));
       }
     }
   } else if constexpr (T == Transform::GradT) {
@@ -230,7 +232,7 @@ __global__ void AdjK(Vol const g, Coef const c, float2 const *__restrict__ y, fl
     for (int d = 0; d < 3; d++) {
       float2 const    w = d == 0 ? v0 : (d == 1 ? v1 : v2);
       long long const at = g.off(i, j, k, bt, d);
-      V[at] = make_float2(fmaf(a, w.x, V[at].x), fmaf(a, w.y, V[at].y));
+      V[at] = make_float2(fmaf(av, w.x, V[at].x), fmaf(av, w.y, V[at].y));
     }
   }
 }
@@ -576,6 +578,58 @@ struct PhaseTimer
   }
 };
 
+/*
+ * Step sizes: the base steps σ0 of each dual block (data, then the terms) and τ0 of the primal blocks x and v; the ratio R
+ * scales them as σ = σ0 / √R, τ = τ0 √R, which keeps the convergence condition |Σ^½ K T^½| <= 1 and sets τ/σ.
+ * Scalar (Chambolle & Pock 2011): σ0 = τ0 = 1/√L for every block, L >= λmax(KᴴΣ̃K).
+ * Per term (Pock & Chambolle 2011, "Diagonal preconditioning for first order primal-dual algorithms in convex
+ * optimization", their α = 1 rule applied to blocks): with n_ij an upper bound of the norm of K's block (dual block i,
+ * primal block j), σ0_i = 1 / Σ_j n_ij and τ0_j = 1 / Σ_i n_ij. The matrix of the n_ij bounds |K|, and by the Schur test
+ * these steps make |diag(√σ0) n diag(√τ0)| <= 1, so |Σ0^½ K T0^½| <= 1 without any L. Blocks: the data term
+ * (n = √λmax(AᴴWA) on x; its dual step already contains W), each term (normX on x, normV on v).
+ */
+struct Steps
+{
+  float              sD0, tx0, tv0;
+  std::vector<float> s0;
+  float              sD, tx, tv;
+  std::vector<float> s;
+
+  void scale(float const R)
+  {
+    float const r = std::sqrt(R);
+    sD = sD0 / r;
+    tx = tx0 * r;
+    tv = tv0 * r;
+    s.resize(s0.size());
+    for (size_t i = 0; i < s0.size(); i++) {
+      s[i] = s0[i] / r;
+    }
+  }
+};
+
+auto MakeSteps(PDHGSetup const &s, float const lamE, float const L) -> Steps
+{
+  Steps st;
+  if (s.termSteps) {
+    float const nD = std::sqrt(lamE);
+    float       cx = nD, cv = 0.f;
+    for (auto const &t : s.terms) {
+      st.s0.push_back(1.f / (t.normX + t.normV));
+      cx += t.normX;
+      cv += t.normV;
+    }
+    st.sD0 = 1.f / nD;
+    st.tx0 = 1.f / cx;
+    st.tv0 = cv > 0.f ? 1.f / cv : st.tx0;
+  } else {
+    float const b = 1.f / std::sqrt(L);
+    st.sD0 = st.tx0 = st.tv0 = b;
+    st.s0.assign(s.terms.size(), b);
+  }
+  return st;
+}
+
 auto GB(size_t const b) -> std::string
 {
   char s[32];
@@ -611,9 +665,9 @@ auto DualBound2(Term const &t, PDHGSetup const &s) -> double
  * dual from its residual, |W(Ax̃ - b)|²_W⁻¹ = |b|²_W - α |AᴴWb|²; the terms' duals from their bounds (DualBound2).
  * Uses X, X̂ and the data dual as scratch and leaves them zero.
  */
-auto DataRatio(SNUFFT const &A, PDHGSetup const &s, Vol const &g, DeviceBuffer &bX, DeviceBuffer &bXh, DeviceBuffer &bYd,
-               DeviceBuffer const &bB, long long const nCK, Reducer &red, std::function<void(std::string const &)> const &log)
-  -> double
+auto DataRatio(SNUFFT const &A, PDHGSetup const &s, Vol const &g, Steps const &st, DeviceBuffer &bX, DeviceBuffer &bXh,
+               DeviceBuffer &bYd, DeviceBuffer const &bB, long long const nCK, Reducer &red,
+               std::function<void(std::string const &)> const &log) -> double
 {
   long long const nX = g.N * g.nB;
   double          n1 = 0., q = 0., bW = 0.;
@@ -632,12 +686,13 @@ auto DataRatio(SNUFFT const &A, PDHGSetup const &s, Vol const &g, DeviceBuffer &
   }
   double const alpha = n1 / q, x2 = alpha * alpha * n1, yd2 = std::max(bW - alpha * n1, 0.);
   double       yr2 = 0.;
-  for (auto const &t : s.terms) {
-    yr2 += DualBound2(t, s);
+  for (size_t ir = 0; ir < s.terms.size(); ir++) {
+    yr2 += DualBound2(s.terms[ir], s) / st.s0[ir];
   }
-  double const r = x2 / (yd2 + yr2);
-  log("Step ratio from the data: |x̃|² " + std::to_string(x2) + ", |y_data|² " + std::to_string(yd2) + ", |y_terms|² <= " +
-      std::to_string(yr2) + ": τ/σ " + std::to_string(r));
+  // The norms in the metrics of the base steps: |x|²/τ0, |y|²/σ0 (with only scalar steps, the same factor everywhere)
+  double const r = (x2 / st.tx0) / (yd2 / st.sD0 + yr2);
+  log("Step ratio from the data: |x̃|² " + std::to_string(x2) + ", |y_data|² " + std::to_string(yd2) +
+      ", Σ |y_term|²/σ0 <= " + std::to_string(yr2) + ": R " + std::to_string(r));
   bX.zero();
   bXh.zero();
   bYd.zero();
@@ -715,18 +770,18 @@ void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf
   Check(cudaGetLastError(), "LLR");
 }
 
-void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float const a)
+void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float const a, float const av)
 {
   Vol const  g = MakeVol(s);
   Coef const c = MakeCoef();
   auto const Y = reinterpret_cast<float2 const *>(y);
   auto const XX = reinterpret_cast<float2 *>(X);
   switch (t.T) {
-  case Transform::Identity: AdjK<Transform::Identity><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a); break;
-  case Transform::Grad: AdjK<Transform::Grad><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a); break;
-  case Transform::GradT: AdjK<Transform::GradT><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a); break;
-  case Transform::TGV1: AdjK<Transform::TGV1><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a); break;
-  case Transform::TGV2: AdjK<Transform::TGV2><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a); break;
+  case Transform::Identity: AdjK<Transform::Identity><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
+  case Transform::Grad: AdjK<Transform::Grad><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
+  case Transform::GradT: AdjK<Transform::GradT><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
+  case Transform::TGV1: AdjK<Transform::TGV1><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
+  case Transform::TGV2: AdjK<Transform::TGV2><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
   }
   Check(cudaGetLastError(), "term adjoint");
 }
@@ -761,9 +816,14 @@ void RunPDHG(SNUFFT const                                    &A,
     L += t.norm2;
   }
   float ratio = s.ratio;
-  float sigma = 1.f / std::sqrt(L * ratio), tau = std::sqrt(ratio / L); // στ = 1/L
+  Steps st = MakeSteps(s, lamE, L);
+  st.scale(ratio);
   log("λmax(AᴴWA) " + std::to_string(lamE) + (s.lambdaE > 0.f ? " (given)" : " (estimated, x 1.02)") + ", L " +
-      std::to_string(L) + ", σ " + std::to_string(sigma) + ", τ " + std::to_string(tau));
+      std::to_string(L) + (s.termSteps ? ", per-term steps" : "") + ", R " + std::to_string(ratio) + ": σ_data " +
+      std::to_string(st.sD) + ", τ_x " + std::to_string(st.tx) + (s.tgv ? ", τ_v " + std::to_string(st.tv) : std::string()));
+  for (size_t ir = 0; ir < s.terms.size(); ir++) {
+    log("  term " + std::to_string(ir) + ": σ " + std::to_string(st.s[ir]));
+  }
 
   size_t const need = PDHGDeviceBytes(s, A.nC(), A.nK()), avail = DeviceFreeBytes();
   log("Device memory for the iterations " + GB(need) + " (free " + GB(avail) + ")");
@@ -791,9 +851,8 @@ void RunPDHG(SNUFFT const                                    &A,
   PhaseTimer          tm;
   int64_t             nIts = 0, nextRatio = 50;
   if (s.autoRatio) {
-    ratio = float(DataRatio(A, s, g, bX, bXh, bYd, bB, nCK, red, log));
-    sigma = 1.f / std::sqrt(L * ratio);
-    tau = std::sqrt(ratio / L);
+    ratio = float(DataRatio(A, s, g, st, bX, bXh, bYd, bB, nCK, red, log));
+    st.scale(ratio);
   }
   std::mt19937        gen(std::random_device{}());
   std::vector<float2> hx;
@@ -802,7 +861,7 @@ void RunPDHG(SNUFFT const                                    &A,
     // Dual steps at x̂: y = prox*_σ(y + σ K x̂)
     tm.mark(0);
     for (int64_t t = 0; t < s.nT; t++) {
-      A.dataDualD(Xh + t * nX, bYd.as<Cxf>() + t * nCK, bB.as<Cxf>() + t * nCK, sigma, s.data);
+      A.dataDualD(Xh + t * nX, bYd.as<Cxf>() + t * nCK, bB.as<Cxf>() + t * nCK, st.sD, s.data);
     }
     tm.mark(1);
     for (size_t ir = 0; ir < s.terms.size(); ir++) {
@@ -815,10 +874,10 @@ void RunPDHG(SNUFFT const                                    &A,
             e = d(gen);
           }
         }
-        LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), sigma, shift);
+        LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), st.s[ir], shift);
         std::swap(bY[ir], bZ);
       } else {
-        TermDual(t, s, Xh, bY[ir].as<Cxf>(), sigma);
+        TermDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir]);
       }
     }
     // Primal step x = x - τ Kᴴ y (G = 0), then x̂ = 2 x - x_old; x̂ holds x_old meanwhile
@@ -826,19 +885,19 @@ void RunPDHG(SNUFFT const                                    &A,
     Check(cudaMemcpyAsync(Xh, X, nP * sizeof(float2), cudaMemcpyDeviceToDevice), "copy");
     tm.mark(3);
     for (int64_t t = 0; t < s.nT; t++) {
-      A.adjointD(bYd.as<Cxf>() + t * nCK, X + t * nX, -tau, true);
+      A.adjointD(bYd.as<Cxf>() + t * nCK, X + t * nX, -st.tx, true);
     }
     tm.mark(4);
     for (size_t ir = 0; ir < s.terms.size(); ir++) {
-      TermAdjoint(s.terms[ir], s, bY[ir].as<Cxf>(), X, -tau);
+      TermAdjoint(s.terms[ir], s, bY[ir].as<Cxf>(), X, -st.tx, -st.tv);
     }
     tm.mark(5);
     auto const [nx2, ndx2] = red.extrapolate(reinterpret_cast<float2 *>(X), reinterpret_cast<float2 *>(Xh), nP);
     tm.mark(6);
     tm.add();
     nIts++;
-    PDHGStatus const st{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
-    bool const       go = status(st);
+    PDHGStatus const ps{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
+    bool const       go = status(ps);
     /* Automatic step ratio. The PDHG error after k iterations is bounded by (|x* - x0|² / τ + |y* - y0|²_Σ⁻¹) / k
      * (Chambolle & Pock 2011); with στ fixed that is smallest for τ / σ = (|x* - x0| / |y* - y0|)², the dual norm in the
      * metric of the dual steps (|y|² / W for the data term). It starts from the data (DataRatio); from x0 = y0 = 0 the
@@ -855,20 +914,23 @@ void RunPDHG(SNUFFT const                                    &A,
       }
       for (size_t ir = 0; ir < s.terms.size(); ir++) {
         auto const y = bY[ir].as<float2>();
-        yr2 += red.dot(y, y, TermRows(s.terms[ir].T, g.nI));
+        yr2 += red.dot(y, y, TermRows(s.terms[ir].T, g.nI)) / st.s0[ir];
       }
-      double const y2 = yd2 + yr2;
+      // In the metrics of the base steps: |x|²/τ0_x + |v|²/τ0_v and |y|²/σ0
+      auto const   Xp = reinterpret_cast<float2 const *>(X);
+      double const xx2 = red.dot(Xp, Xp, g.nI), xv2 = s.tgv ? std::max(nx2 - xx2, 0.) : 0.;
+      double const x2m = xx2 / st.tx0 + xv2 / st.tv0;
+      double const y2 = yd2 / st.sD0 + yr2;
       log("|x|² " + std::to_string(nx2) + " |y_data|²_W⁻¹ " + std::to_string(yd2) + " (plain " + std::to_string(yd2plain) +
           ") |y_terms|² " + std::to_string(yr2));
-      if (y2 > 0. && nx2 > 0.) {
-        double const target = nx2 / y2;
+      if (y2 > 0. && x2m > 0.) {
+        double const target = x2m / y2;
         float const  r = std::clamp(float(std::exp(0.5 * std::log(target) + 0.5 * std::log(double(ratio)))), ratio / 2.f,
                                     2.f * ratio);
         log("Step ratio τ/σ " + std::to_string(ratio) + " -> " + std::to_string(r) + " (target (|x|/|y|)² " +
             std::to_string(target) + ")");
         ratio = r;
-        sigma = 1.f / std::sqrt(L * ratio);
-        tau = std::sqrt(ratio / L);
+        st.scale(ratio);
       }
     }
     if (debug && debugEvery > 0 && it % debugEvery == 0) {
@@ -877,7 +939,7 @@ void RunPDHG(SNUFFT const                                    &A,
       debug(it, reinterpret_cast<Cxf const *>(hx.data()));
     }
     if (!go) { break; }
-    if (st.normdx < s.tol * st.normx) {
+    if (ps.normdx < s.tol * ps.normx) {
       log("Δ tolerance reached");
       break;
     }

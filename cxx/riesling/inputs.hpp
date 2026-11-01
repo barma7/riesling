@@ -70,7 +70,7 @@ struct PDHGArgs
   args::Flag             adaptive, lad, weighted;
   args::ValueFlag<Index> its;
   args::ValueFlag<float> tol, λE, ratio;
-  args::Flag             autoRatio;
+  args::Flag             autoRatio, termSteps;
 
   PDHGArgs(args::Subparser &parser);
   auto Get() -> rl::PDHG::Opts;

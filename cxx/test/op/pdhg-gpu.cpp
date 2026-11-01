@@ -119,7 +119,7 @@ TEST_CASE("PDHG-GPU-terms", "[gpu]")
   }
   gpu::Term const t{.T = T};
   Dev             dX(X0), dy(y);
-  gpu::TermAdjoint(t, s, dy.p(), dX.p(), a);
+  gpu::TermAdjoint(t, s, dy.p(), dX.p(), a, a);
   CHECK(RelDiff(dX.get(nX), eX) == Approx(0).margin(1.e-6));
 }
 

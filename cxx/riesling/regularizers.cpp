@@ -206,8 +206,11 @@ auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
       throw Log::Failure("Regs", "Isotropic dims must be b, g, or bg");
     }
     ProxKind const P = opts.iso ? ProxKind::L2 : ProxKind::L1;
-    r.terms.push_back({.T = Transform::TGV1, .P = P, .lambda = opts.tgv.Get(), .normMask = mask, .norm2 = 2.f});
-    r.terms.push_back({.T = Transform::TGV2, .P = P, .lambda = opts.tgv.Get(), .normMask = mask, .norm2 = 0.25f});
+    // Block norms: ∇ (1) and -I (1) for ∇x - v, the symmetrized gradient (√0.25) for ε(v)
+    r.terms.push_back(
+      {.T = Transform::TGV1, .P = P, .lambda = opts.tgv.Get(), .normMask = mask, .norm2 = 2.f, .normX = 1.f, .normV = 1.f});
+    r.terms.push_back(
+      {.T = Transform::TGV2, .P = P, .lambda = opts.tgv.Get(), .normMask = mask, .norm2 = 0.25f, .normX = 0.f, .normV = 0.5f});
   }
   if (opts.tv) {
     unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bgt") : 0u;

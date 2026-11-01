@@ -44,6 +44,8 @@ struct Term
   int       llrPatch = 5, llrWindow = 3;
   bool      llrShift = false; // Random window shift per application, as the CPU option
   float     norm2 = 1.f;      // Upper bound of λmax(T'T), for the step sizes
+  float     normX = 1.f;      // Upper bounds of the norms of T's blocks on x and on v (TGV), for the per-term steps
+  float     normV = 0.f;
 };
 
 struct PDHGSetup
@@ -57,6 +59,7 @@ struct PDHGSetup
   float             lambdaE = 0.f; // λmax(Aᴴ W A); <= 0: estimate it (Lanczos on the device, 2% margin)
   int               lanczosIts = 24;
   float             ratio = 1.f;  // τ / σ (primal over dual step); στ = 1/L
+  bool              termSteps = false; // Per-term steps (Pock & Chambolle 2011, block form) instead of σ, τ for all
   bool              autoRatio = false; // Start ratio from the data, then adapt to (|x|/|y|)² at 50, 100, ... (RunPDHG)
 };
 
@@ -89,10 +92,11 @@ void RunPDHG(SNUFFT const                                        &A,
 /*
  * Building blocks, exposed for the tests (device pointers). xh: [x; v] (v only with TGV), y: the term's dual.
  * TermDual: y = conj prox_σ(y + σ T xh) for L1, L1I and L2 terms; LLRDual: the same for LLR terms (identity transform),
- * written to z (the patches overlap neighbouring windows, so not in place). TermAdjoint: X += a Tᴴ y.
+ * written to z (the patches overlap neighbouring windows, so not in place). TermAdjoint: X += Tᴴ y scaled by ax on the
+ * x part and by av on the v part (TGV).
  */
 void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float sigma);
 void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf *z, float sigma, int const shift[3]);
-void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float a);
+void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float ax, float av);
 
 } // namespace rl::gpu

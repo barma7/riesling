@@ -85,6 +85,8 @@ PDHGArgs::PDHGArgs(args::Subparser &parser)
   , ratio(parser, "R", "PDHG: primal over dual step size, τ/σ (default 1; στ = 1/L either way)", {"pdhg-ratio"}, 1.f)
   , autoRatio(parser, "A", "PDHG: choose τ/σ automatically (from the data, then from the iterates); overrides --pdhg-ratio",
               {"pdhg-auto-ratio"})
+  , termSteps(parser, "T", "PDHG: per-term step sizes (Pock & Chambolle 2011) instead of one σ and τ; GPU only",
+              {"pdhg-term-steps"})
 {
 }
 
@@ -94,7 +96,7 @@ auto PDHGArgs::Get() -> rl::PDHG::Opts
   if (!(ratio.Get() > 0.f)) { throw rl::Log::Failure("PDHG", "--pdhg-ratio must be positive"); }
   return rl::PDHG::Opts{
     .adaptive = adaptive, .lad = lad, .weighted = weighted, .imax = its.Get(), .tol = tol.Get(), .λE = λE.Get(),
-    .ratio = ratio.Get(), .autoRatio = autoRatio};
+    .ratio = ratio.Get(), .termSteps = termSteps, .autoRatio = autoRatio};
 }
 
 ADMMArgs::ADMMArgs(args::Subparser &parser)
