@@ -262,13 +262,18 @@ template struct L2<6, 1>;
 template struct L2<6, 2>;
 template struct L2<6, 3>;
 
-auto SumOfSquares::Make(CMap b_, Ops::Op::Ptr P_) -> Prox::Ptr { return std::make_shared<SumOfSquares>(b_, P_); }
+auto SumOfSquares::Make(CMap b_, Ops::Op::Ptr P_, bool const w) -> Prox::Ptr
+{
+  return std::make_shared<SumOfSquares>(b_, P_, w);
+}
 
-SumOfSquares::SumOfSquares(CMap b_, Ops::Op::Ptr P_)
+SumOfSquares::SumOfSquares(CMap b_, Ops::Op::Ptr P_, bool const w)
   : Prox(b_.size())
   , b{b_}
   , P{P_}
+  , weighted{w}
 {
+  if (weighted && !P) { throw(Log::Failure("SoS", "Weighted least squares needs the weights (preconditioner)")); }
   if (P && P->rows() != b.size()) {
     throw(Log::Failure("SoS", "Preconditioner size {} did not match data size {}", P->rows(), b.size()));
   }
@@ -286,7 +291,10 @@ void SumOfSquares::apply(float const α, Map x) const
 void SumOfSquares::conj(float const α, Map x) const
 {
   float const nx = ParallelNorm(x);
-  if (P) {
+  if (P && weighted) { // f*(y) = ½|y|²_P⁻¹ + <y, b> with the dual step αP: y = (x - αPb) / (1 + α)
+    P->iforward(b, x, -α);
+    x.device(Threads::CoreDevice()) = x / Cx(1.f + α);
+  } else if (P) {
     P->iforward(b, x, -α);
     P->inverse(CMap(x.data(), x.size()), x, α, 1.f);
   } else {

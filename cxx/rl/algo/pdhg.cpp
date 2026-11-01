@@ -85,7 +85,7 @@ auto Run(CMap b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opt
   /* Data consistency term */
   As[0] = E;
   Ps[0] = P;
-  proxs[0] = opts.lad ? Proxs::L1::Make(1.f, b, P) : Proxs::SumOfSquares::Make(b, P);
+  proxs[0] = opts.lad ? Proxs::L1::Make(1.f, b, P) : Proxs::SumOfSquares::Make(b, P, opts.weighted);
   /* Regularizers */
   for (Index ir = 0; ir < regs.size(); ir++) {
     As[ir + 1] = regs[ir].T;
@@ -101,7 +101,7 @@ auto Run(CMap b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opt
   float const η = 0.95f;
   float const Δ = 1.5f;
   Log::Print("PDHG", "{}{}σ {:4.3E} τ {:4.3E} Convergence Tolerance {}", opts.adaptive ? "Adaptive " : "",
-             opts.lad ? "LAD " : "", σ, τ, opts.tol);
+             opts.lad ? "LAD " : (opts.weighted ? "weighted LS " : ""), σ, τ, opts.tol);
   Vector x(E->cols()), x̅(E->cols()), xold(E->cols());
   x.setZero();
   x̅.setZero();
@@ -210,7 +210,7 @@ auto Restarted(Index const nInner, CMap b, Op::Ptr E, Op::Ptr P, std::vector<Reg
   /* Data consistency term */
   As[0] = E;
   Ps[0] = P;
-  proxs[0] = opts.lad ? Proxs::L1::Make(1.f, b, P) : Proxs::SumOfSquares::Make(b, P);
+  proxs[0] = opts.lad ? Proxs::L1::Make(1.f, b, P) : Proxs::SumOfSquares::Make(b, P, opts.weighted);
   /* Regularizers */
   for (Index ir = 0; ir < regs.size(); ir++) {
     As[ir + 1] = regs[ir].T;
@@ -226,7 +226,7 @@ auto Restarted(Index const nInner, CMap b, Op::Ptr E, Op::Ptr P, std::vector<Reg
   float const η = 0.95f;
   float const Δ = 1.5f;
   Log::Print("PDHG", "{}{}σ {:4.3E} τ {:4.3E} Convergence Tolerance {}", opts.adaptive ? "Adaptive " : "",
-             opts.lad ? "LAD " : "", σ, τ, opts.tol);
+             opts.lad ? "LAD " : (opts.weighted ? "weighted LS " : ""), σ, τ, opts.tol);
   Vector x(E->cols()), x̂(E->cols()) /* Extrapolated/Momentum */, x̅(E->cols()) /* Average of iterations */, xold(E->cols());
   x̅.setZero();
 

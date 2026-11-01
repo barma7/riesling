@@ -77,6 +77,8 @@ auto LSMRArgs::Get() -> rl::LSMR::Opts
 PDHGArgs::PDHGArgs(args::Subparser &parser)
   : adaptive(parser, "A", "Adaptive step sizes", {"adaptive"})
   , lad(parser, "L", "Least Absolute Deviations, PDHG only", {"lad", 'l'})
+  , weighted(parser, "W", "PDHG: weight the data term by the k-space weights (ADMM's objective), not only the dual steps",
+             {"pdhg-weighted"})
   , its(parser, "N", "Max iterations (4)", {"max-its", 'i'}, 128)
   , tol(parser, "B", "PDHG residual/Δ tolerance (1e-2)", {"pdhg-tol", 't'}, 1.e-4f)
   , λE(parser, "λE", "Max eigenvalue of the preconditioned encoding operator (default: estimated)", {"lambda-E", 'e'}, 0.f)
@@ -85,7 +87,9 @@ PDHGArgs::PDHGArgs(args::Subparser &parser)
 
 auto PDHGArgs::Get() -> rl::PDHG::Opts
 {
-  return rl::PDHG::Opts{.adaptive = adaptive, .lad = lad, .imax = its.Get(), .tol = tol.Get(), .λE = λE.Get()};
+  if (lad && weighted) { throw rl::Log::Failure("PDHG", "--lad and --pdhg-weighted exclude each other"); }
+  return rl::PDHG::Opts{
+    .adaptive = adaptive, .lad = lad, .weighted = weighted, .imax = its.Get(), .tol = tol.Get(), .λE = λE.Get()};
 }
 
 ADMMArgs::ADMMArgs(args::Subparser &parser)

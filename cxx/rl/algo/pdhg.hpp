@@ -14,6 +14,7 @@ using Debug = std::function<void(Index const, Vector const &, Vector const &)>;
 struct Opts
 {
   bool  adaptive, lad;
+  bool  weighted = false; // Data term ½|Ax - b|²_P (ADMM's objective) instead of ½|Ax - b|² with P only as dual step
   Index imax;
   float tol, λE; // λE: λmax(A'PA), <= 0 to estimate it
 };

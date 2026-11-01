@@ -50,17 +50,22 @@ private:
   Sz<O - D> otherDims;
 };
 
+/* ½|x - b|², or with weighted ½|x - b|²_P (P a positive diagonal). In PDHG the preconditioner P is also the dual step of
+ * the data term (Ong et al. 2019): without weighted it only speeds up convergence, with weighted it is also the data
+ * weighting of the objective (as in RIESLING's ADMM / LSMR). Only conj() knows about the weighting.
+ */
 struct SumOfSquares final : Prox
 {
   PROX_INHERIT
-  static auto Make(CMap b, Ops::Op::Ptr precon = nullptr) -> Prox::Ptr;
-  SumOfSquares(CMap b, Ops::Op::Ptr precon);
+  static auto Make(CMap b, Ops::Op::Ptr precon = nullptr, bool const weighted = false) -> Prox::Ptr;
+  SumOfSquares(CMap b, Ops::Op::Ptr precon, bool const weighted = false);
   void apply(float const α, Map x) const;
   void conj(float const α, Map x) const;
 
 private:
   CMap const   b;
   Ops::Op::Ptr P;
+  bool         weighted;
 };
 
 } // namespace rl::Proxs
