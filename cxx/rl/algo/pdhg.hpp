@@ -15,7 +15,7 @@ struct Opts
 {
   bool  adaptive, lad;
   Index imax;
-  float tol, λE;
+  float tol, λE; // λE: λmax(A'PA), <= 0 to estimate it
 };
 
 auto Run(Vector const &b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opts opts, Debug d = nullptr) -> Vector;

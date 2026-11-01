@@ -72,12 +72,16 @@ TEST_CASE("Grad-adjoint", "[op]")
   SECTION("Norms")
   {
     // λmax(F'F): the gradients are scaled to 1 (reached for even sizes); ∇x - v adds the identity on v
-    float const g = Norm2(grad5), t = Norm2(gradt), v = Norm2(gv6), f1 = Norm2(tgv1), f2 = Norm2(tgv2);
-    INFO("Grad " << g << " GradT " << t << " GradVec " << v << " TGV1 " << f1 << " TGV2 " << f2);
+    float const g = Norm2(grad5), t = Norm2(gradt), v = Norm2(gv6), f1 = Norm2(tgv1), f2 = Norm2(tgv2), l = Norm2(iso);
+    INFO("Grad " << g << " GradT " << t << " GradVec " << v << " TGV1 " << f1 << " TGV2 " << f2 << " IsoΔ3D " << l);
     CHECK(g == Approx(1.f).margin(1.e-3f));
     CHECK(t <= 1.f + 1.e-3f);
     CHECK(v <= 1.f + 1.e-3f);
     CHECK(f1 == Approx(2.f).margin(2.e-3f));
     CHECK(f2 == Approx(v).margin(1.e-3f));
+    CHECK(l <= 1.01f); // --tv2 uses 1 + 1.01 as the bound for [∇; Δ]
+    // Lanczos reaches the same values in far fewer iterations
+    CHECK(LanczosMax(grad5, nullptr, 40) == Approx(g).margin(2.e-3f));
+    CHECK(LanczosMax(tgv1, nullptr, 40) == Approx(f1).margin(4.e-3f));
   }
 }

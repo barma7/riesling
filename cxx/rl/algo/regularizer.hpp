@@ -13,6 +13,7 @@ struct Regularizer
   Ops::Op::Ptr     T;
   Proxs::Prox::Ptr P;
   SizeN                shape;
+  float                norm2 = 1.f; // Upper bound of λmax(T'T), 1 for T = identity: PDHG's step sizes
 };
 
 } // namespace rl

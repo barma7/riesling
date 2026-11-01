@@ -52,6 +52,23 @@ auto PDResiduals(Vector const               &x,
   return {pres, dres};
 }
 
+/* L >= λmax of K'ΣK for the stacked operator K = [A; T_1; ...] with the data rows weighted by the preconditioner P, so
+ * that the step sizes σ = τ = 1/√L satisfy στ‖K‖² <= 1. λmax(A'PA) is estimated (Lanczos, 2% margin) unless given;
+ * each regularizer carries an upper bound of λmax(T'T). Until 2026-11 L was λE (default 1) + the number of
+ * regularizers, too small when λmax(A'PA) > 1 (~2.5 for a 3D radial subspace recon with RIESLING's weights) and for TGV
+ * (∇x - v has λmax 2).
+ */
+auto StepL(Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, float const λE) -> float
+{
+  float const λ = λE > 0.f ? λE : 1.02f * LanczosMax(E, P, 24);
+  float       L = λ;
+  for (auto const &r : regs) {
+    L += r.norm2;
+  }
+  Log::Print("PDHG", "λmax(A'PA) {:4.3E}{} L {:4.3E}", λ, λE > 0.f ? " (given)" : " (estimated)", L);
+  return L;
+}
+
 auto Run(Vector const &b, Op::Ptr A, Op::Ptr P, std::vector<Regularizer> const &regs, Opts opts, Debug d) -> Vector
 {
   return Run(CMap{b.data(), b.rows()}, A, P, regs, opts, d);
@@ -76,9 +93,7 @@ auto Run(CMap b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opt
     proxs[ir + 1] = regs[ir].P;
   }
 
-  /* Assumes all regularizer transforms have max eval=1 */
-  /* Note difference between eigenvalues in Ong and singular values in Sidky */
-  float const L = opts.λE + regs.size();
+  float const L = StepL(E, P, regs, opts.λE);
   float       σ = 1.f / std::sqrt(L);
   float       τ = 1.f / std::sqrt(L);
   float       α = 0.5f;
@@ -203,9 +218,7 @@ auto Restarted(Index const nInner, CMap b, Op::Ptr E, Op::Ptr P, std::vector<Reg
     proxs[ir + 1] = regs[ir].P;
   }
 
-  /* Assumes all regularizer transforms have max eval=1 */
-  /* Note difference between eigenvalues in Ong and singular values in Sidky */
-  float const L = opts.λE + regs.size();
+  float const L = StepL(E, P, regs, opts.λE);
   float       σ = 1.f / std::sqrt(L);
   float       τ = 1.f / std::sqrt(L);
   float       α = 0.5f;

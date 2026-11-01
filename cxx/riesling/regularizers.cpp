@@ -66,8 +66,9 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
       prox_x = Proxs::L1::Make(opts.tgv.Get(), op1->rows());
       prox_v = Proxs::L1::Make(opts.tgv.Get(), op2->rows());
     }
-    regs.push_back({op1, prox_x, grad_x->oshape});
-    regs.push_back({op2, prox_v, grad_v->oshape});
+    // λmax(T'T): 1 + λmax(∇'∇) = 2 for ∇x - v, 0.25 for the symmetrized gradient (test/op/grad-adjoint.cpp)
+    regs.push_back({op1, prox_x, grad_x->oshape, 2.f});
+    regs.push_back({op2, prox_v, grad_v->oshape, 0.25f});
     A = std::make_shared<Ops::Multiply>(A, ext_x);
     return {regs, A, ext_x};
   }
@@ -124,7 +125,7 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
       pl = Proxs::L1::Make(opts.tv2.Get() * (1 - σ), lap->rows());
     }
     auto prox = Proxs::Stack::Make({pg, pl});
-    regs.push_back({both, prox, grad->oshape});
+    regs.push_back({both, prox, grad->oshape, 2.01f}); // λmax(∇'∇ + Δ'Δ) <= 1 + 1.01 (test/op/grad-adjoint.cpp)
   }
 
   if (opts.tvt) {
