@@ -33,6 +33,7 @@ struct SENSENUFFTGPU final : TOp<4, 3>
   auto normal() const -> TOp<4, 4>::Ptr; // Aᴴ W A on the image space
   auto gridAdjoint(Cx3 const &y) const -> Cx5; // Gridding adjoint only (x, y, z on the grid, b, c), for accuracy checks
   void logTimes() const;                 // Device time per stage so far (debug log)
+  auto device() const -> std::shared_ptr<gpu::SNUFFT>; // The device operator (device-pointer interface), for GPU solvers
 
 private:
   std::shared_ptr<gpu::SNUFFT> impl_;

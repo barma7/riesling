@@ -225,6 +225,8 @@ SENSENUFFTGPU::SENSENUFFTGPU(
 
 SENSENUFFTGPU::~SENSENUFFTGPU() { logTimes(); }
 
+auto SENSENUFFTGPU::device() const -> std::shared_ptr<gpu::SNUFFT> { return impl_; }
+
 void SENSENUFFTGPU::logTimes() const
 {
 #ifdef RL_CUDA

@@ -77,6 +77,15 @@ struct Samples
   long long     n;
 };
 
+// Fused PDHG data-term dual step at the end of the interpolation (kind 0: plain output), see SNUFFT::dataDualD
+struct Dual
+{
+  float2       *y = nullptr; // Dual variable, device order
+  float2 const *b = nullptr; // Data, device order
+  float         sigma = 0.f;
+  int           kind = 0;
+};
+
 __device__ inline auto CMul(float2 const a, float2 const b) -> float2
 {
   return make_float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
@@ -136,7 +145,7 @@ __global__ void Expand(Geo const g,
 
 /*
  * x(v, b) (+)= sigma (-1)^(gx+gy+gz) fs * (ws(g, b) * apo(v)) * conj(maps(v, b or 0, c)), summed over the channels: the first
- * channel writes, the last multiplies by s.
+ * channel writes, the last multiplies by s. With accumulate, every channel adds s times its term (x += s Aᴴ y).
  */
 __global__ void Collect(Geo const g,
                         float2 const *__restrict__ ws,
@@ -146,7 +155,8 @@ __global__ void Collect(Geo const g,
                         int const   c,
                         float const s,
                         bool const  first,
-                        bool const  last)
+                        bool const  last,
+                        bool const  accumulate = false)
 {
   long long const v = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   if (v >= g.N) { return; }
@@ -163,6 +173,11 @@ __global__ void Collect(Geo const g,
     float2 const m = maps[v + g.N * (mb + (long long)g.nMB * c)];
     float const  yr = w.x * a, yi = w.y * a;
     float2       acc = make_float2(yr * m.x + yi * m.y, yi * m.x - yr * m.y);
+    if (accumulate) {
+      float2 const o = x[v + g.N * b];
+      x[v + g.N * b] = make_float2(fmaf(s, acc.x, o.x), fmaf(s, acc.y, o.y));
+      continue;
+    }
     if (!first) {
       float2 const o = x[v + g.N * b];
       acc.x += o.x;
@@ -191,7 +206,8 @@ template <int FW, int NBT> __global__ void __launch_bounds__(256) Interp(Geo con
                                                                      bool const  weighted,
                                                                      float2 *__restrict__ out,
                                                                      bool const  toFull,
-                                                                     int const   c)
+                                                                     int const   c,
+                                                                     Dual const  d)
 {
   long long const is = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   if (is >= smp.n) { return; }
@@ -254,6 +270,16 @@ template <int FW, int NBT> __global__ void __launch_bounds__(256) Interp(Geo con
   }
   y.x *= base;
   y.y *= base;
+  if (d.kind) {
+    long long const o = smp.n * c + is;
+    float const     W = wch ? wch[o] : of.w;
+    float2 const    yo = d.y[o], bo = d.b[o];
+    float const     sw = d.sigma * W;
+    float2          u = make_float2(fmaf(sw, y.x - bo.x, yo.x), fmaf(sw, y.y - bo.y, yo.y));
+    float const     f = d.kind == 1 ? 1.f / (1.f + sw) : (d.kind == 2 ? 1.f / (1.f + d.sigma) : 1.f / fmaxf(hypotf(u.x, u.y), 1.f));
+    d.y[o] = make_float2(u.x * f, u.y * f);
+    return;
+  }
   if (weighted) {
     float const W = wch ? wch[smp.n * c + is] : of.w;
     y.x *= W;
@@ -268,16 +294,16 @@ template <int FW, int NBT> __global__ void __launch_bounds__(256) Interp(Geo con
 
 template <int FW> void LaunchInterp(unsigned const nb, Geo const &g, Kern const &k, Samples const &smp, float2 const *ws,
                                     float2 const *basis, float const bscale, float const *wch, bool const weighted,
-                                    float2 *out, bool const toFull, int const c)
+                                    float2 *out, bool const toFull, int const c, Dual const d)
 {
   switch (std::min(g.nB, 8)) {
-  case 1: Interp<FW, 1><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
-  case 2: Interp<FW, 2><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
-  case 3: Interp<FW, 3><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
-  case 4: Interp<FW, 4><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
-  case 5: Interp<FW, 5><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
-  case 6: Interp<FW, 6><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
-  default: Interp<FW, 8><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c); break;
+  case 1: Interp<FW, 1><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
+  case 2: Interp<FW, 2><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
+  case 3: Interp<FW, 3><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
+  case 4: Interp<FW, 4><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
+  case 5: Interp<FW, 5><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
+  case 6: Interp<FW, 6><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
+  default: Interp<FW, 8><<<nb, 256>>>(g, k, smp, ws, basis, bscale, wch, weighted, out, toFull, c, d); break;
   }
 }
 
@@ -489,6 +515,27 @@ struct Event
 
 } // namespace
 
+// Device order (channel-major, the operator's sample order) from / to the full k-space (channel fastest)
+__global__ void ToDeviceOrder(float2 const *__restrict__ k, int const *__restrict__ idx, long long const n, int const nC,
+                              float2 *__restrict__ dk)
+{
+  long long const i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (i >= n * nC) { return; }
+  long long const is = i % n;
+  int const       c = int(i / n);
+  dk[i] = k[c + (long long)nC * idx[is]];
+}
+
+__global__ void FromDeviceOrder(float2 const *__restrict__ dk, int const *__restrict__ idx, long long const n, int const nC,
+                                float2 *__restrict__ k)
+{
+  long long const i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (i >= n * nC) { return; }
+  long long const is = i % n;
+  int const       c = int(i / n);
+  k[c + (long long)nC * idx[is]] = dk[i];
+}
+
 struct SNUFFT::Impl
 {
   SNUFFTSetup set;
@@ -515,7 +562,8 @@ struct SNUFFT::Impl
   ~Impl() { cufftDestroy(plan); }
 
   auto samples() const -> Samples { return Samples{ki.p, off.p, idx.p, brow.p, nValid}; }
-  void interp(int const c, bool const weightedOut, float2 *out, bool const toFull) const;
+  void interp(int const c, bool const weightedOut, float2 *out, bool const toFull, Dual const d = {}) const;
+  void hostBuffers(); // The staging vectors of the host-pointer interface, allocated when first used
   void spread(int const c, float2 const *in, bool const fromFull) const;
   void fft(bool const fwd) const;
   void record(int const i) const { Check(cudaEventRecord(ev[i].e), "event record"); }
@@ -654,8 +702,6 @@ SNUFFT::Impl::Impl(SNUFFTSetup const &s)
   }
   ws.alloc(geo.G * s.nB);
   yk.alloc(nValid);
-  xin.alloc(geo.N * s.nB);
-  xout.alloc(geo.N * s.nB);
 
   int n[3] = {int(s.gz), int(s.gy), int(s.gx)};
   Check(cufftPlanMany(&plan, 3, n, nullptr, 1, int(geo.G), nullptr, 1, int(geo.G), CUFFT_C2C, int(s.nB)), "plan");
@@ -668,15 +714,23 @@ void SNUFFT::Impl::fft(bool const fwd) const
         "exec");
 }
 
-void SNUFFT::Impl::interp(int const c, bool const weightedOut, float2 *out, bool const toFull) const
+void SNUFFT::Impl::hostBuffers()
+{
+  if (xin.n == 0) {
+    xin.alloc(geo.N * set.nB);
+    xout.alloc(geo.N * set.nB);
+  }
+}
+
+void SNUFFT::Impl::interp(int const c, bool const weightedOut, float2 *out, bool const toFull, Dual const d) const
 {
   auto const smp = samples();
   auto const nb = Blocks(nValid);
   switch (FW) {
-  case 1: LaunchInterp<1>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c); break;
-  case 5: LaunchInterp<5>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c); break;
-  case 7: LaunchInterp<7>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c); break;
-  case 9: LaunchInterp<9>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c); break;
+  case 1: LaunchInterp<1>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c, d); break;
+  case 5: LaunchInterp<5>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c, d); break;
+  case 7: LaunchInterp<7>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c, d); break;
+  case 9: LaunchInterp<9>(nb, geo, kern, smp, ws.p, basis.p, bscale, wch.p, weightedOut, out, toFull, c, d); break;
   }
   Check(cudaGetLastError(), "interp");
 }
@@ -692,6 +746,61 @@ void SNUFFT::Impl::spread(int const c, float2 const *in, bool const fromFull) co
   case 7: LaunchSpread<7>(geo.nB, nBins, geo, kern, smp, bins.p, in, fromFull, basis.p, bscale, ws.p, c); break;
   case 9: LaunchSpread<9>(geo.nB, nBins, geo, kern, smp, bins.p, in, fromFull, basis.p, bscale, ws.p, c); break;
   }
+}
+
+DeviceBuffer::DeviceBuffer(size_t const bytes)
+  : n_{bytes}
+{
+  if (n_) { Check(cudaMalloc(&p_, n_), "cudaMalloc"); }
+}
+
+DeviceBuffer::~DeviceBuffer()
+{
+  if (p_) { cudaFree(p_); }
+}
+
+DeviceBuffer::DeviceBuffer(DeviceBuffer &&o) noexcept
+  : p_{o.p_}
+  , n_{o.n_}
+{
+  o.p_ = nullptr;
+  o.n_ = 0;
+}
+
+DeviceBuffer &DeviceBuffer::operator=(DeviceBuffer &&o) noexcept
+{
+  if (this != &o) {
+    if (p_) { cudaFree(p_); }
+    p_ = o.p_;
+    n_ = o.n_;
+    o.p_ = nullptr;
+    o.n_ = 0;
+  }
+  return *this;
+}
+
+void DeviceBuffer::upload(void const *h, size_t const bytes)
+{
+  if (bytes > n_) { throw std::runtime_error("DeviceBuffer: upload larger than the buffer"); }
+  Check(cudaMemcpy(p_, h, bytes, cudaMemcpyHostToDevice), "upload");
+}
+
+void DeviceBuffer::download(void *h, size_t const bytes) const
+{
+  if (bytes > n_) { throw std::runtime_error("DeviceBuffer: download larger than the buffer"); }
+  Check(cudaMemcpy(h, p_, bytes, cudaMemcpyDeviceToHost), "download");
+}
+
+void DeviceBuffer::zero()
+{
+  if (n_) { Check(cudaMemset(p_, 0, n_), "memset"); }
+}
+
+auto DeviceFreeBytes() -> size_t
+{
+  size_t f = 0, t = 0;
+  Check(cudaMemGetInfo(&f, &t), "cudaMemGetInfo");
+  return f;
 }
 
 auto PinHost(void *p, size_t const bytes) -> bool
@@ -732,6 +841,7 @@ void SNUFFT::resetTimes() const { impl_->times = SNUFFTTimes{}; }
 void SNUFFT::forward(Cxf const *x, Cxf *y, float const s) const
 {
   auto &m = *impl_;
+  m.hostBuffers();
   auto &t = m.times;
   if (m.kfull.n == 0) { m.kfull.alloc(m.set.nC * m.set.nSamp * m.set.nTrace); }
   m.record(0);
@@ -763,6 +873,7 @@ void SNUFFT::forward(Cxf const *x, Cxf *y, float const s) const
 void SNUFFT::adjoint(Cxf const *y, Cxf *x, float const s) const
 {
   auto &m = *impl_;
+  m.hostBuffers();
   auto &t = m.times;
   if (m.kfull.n == 0) { m.kfull.alloc(m.set.nC * m.set.nSamp * m.set.nTrace); }
   m.record(0);
@@ -806,6 +917,7 @@ void SNUFFT::gridAdjoint(Cxf const *y, Cxf *grid) const
 void SNUFFT::normal(Cxf const *x, Cxf *y, float const s) const
 {
   auto &m = *impl_;
+  m.hostBuffers();
   auto &t = m.times;
   m.record(0);
   Check(cudaMemcpy(m.xin.p, x, m.xin.bytes(), cudaMemcpyHostToDevice), "copy x");
@@ -840,6 +952,93 @@ void SNUFFT::normal(Cxf const *x, Cxf *y, float const s) const
   Check(cudaEventSynchronize(m.ev[2].e), "sync");
   t.copyOut += m.elapsed(1, 2);
   t.calls++;
+}
+
+auto SNUFFT::nK() const -> int64_t { return impl_->nValid; }
+
+void SNUFFT::sync() const { Check(cudaDeviceSynchronize(), "sync"); }
+
+void SNUFFT::toDeviceOrder(Cxf const *k, Cxf *dk) const
+{
+  auto const     &m = *impl_;
+  long long const nFull = m.set.nC * m.set.nSamp * m.set.nTrace, n = m.nValid * m.set.nC;
+  DBuf<float2>    full;
+  full.upload(reinterpret_cast<float2 const *>(k), nFull);
+  ToDeviceOrder<<<Blocks(n), Threads>>>(full.p, m.idx.p, m.nValid, int(m.set.nC), reinterpret_cast<float2 *>(dk));
+  Check(cudaGetLastError(), "to device order");
+  Check(cudaDeviceSynchronize(), "sync");
+}
+
+void SNUFFT::fromDeviceOrder(Cxf const *dk, Cxf *k) const
+{
+  auto const     &m = *impl_;
+  long long const nFull = m.set.nC * m.set.nSamp * m.set.nTrace, n = m.nValid * m.set.nC;
+  DBuf<float2>    full;
+  full.alloc(nFull);
+  Check(cudaMemset(full.p, 0, full.bytes()), "memset");
+  FromDeviceOrder<<<Blocks(n), Threads>>>(reinterpret_cast<float2 const *>(dk), m.idx.p, m.nValid, int(m.set.nC), full.p);
+  Check(cudaGetLastError(), "from device order");
+  Check(cudaMemcpy(k, full.p, full.bytes(), cudaMemcpyDeviceToHost), "copy k");
+}
+
+void SNUFFT::forwardD(Cxf const *x, Cxf *y, float const s) const
+{
+  auto const &m = *impl_;
+  auto const  xd = reinterpret_cast<float2 const *>(x);
+  auto const  yd = reinterpret_cast<float2 *>(y);
+  for (int c = 0; c < m.geo.nC; c++) {
+    Expand<<<Blocks(m.geo.G), Threads>>>(m.geo, xd, m.maps.p, m.apo.p, m.ws.p, c, s);
+    Check(cudaGetLastError(), "expand");
+    m.fft(true);
+    m.interp(c, false, yd + m.nValid * c, false);
+  }
+}
+
+void SNUFFT::adjointD(Cxf const *y, Cxf *x, float const s, bool const add) const
+{
+  auto const &m = *impl_;
+  auto const  yd = reinterpret_cast<float2 const *>(y);
+  auto const  xd = reinterpret_cast<float2 *>(x);
+  for (int c = 0; c < m.geo.nC; c++) {
+    m.spread(c, yd + m.nValid * c, false);
+    m.fft(false);
+    Collect<<<Blocks(m.geo.N), Threads>>>(m.geo, m.ws.p, m.maps.p, m.apo.p, xd, c, s, c == 0, c == m.geo.nC - 1, add);
+    Check(cudaGetLastError(), "collect");
+  }
+}
+
+void SNUFFT::normalD(Cxf const *x, Cxf *y, float const s) const
+{
+  auto const &m = *impl_;
+  auto const  xd = reinterpret_cast<float2 const *>(x);
+  auto const  yd = reinterpret_cast<float2 *>(y);
+  for (int c = 0; c < m.geo.nC; c++) {
+    Expand<<<Blocks(m.geo.G), Threads>>>(m.geo, xd, m.maps.p, m.apo.p, m.ws.p, c, 1.f);
+    Check(cudaGetLastError(), "expand");
+    m.fft(true);
+    m.interp(c, m.weighted, m.yk.p, false);
+    m.spread(c, m.yk.p, false);
+    m.fft(false);
+    Collect<<<Blocks(m.geo.N), Threads>>>(m.geo, m.ws.p, m.maps.p, m.apo.p, yd, c, s, c == 0, c == m.geo.nC - 1);
+    Check(cudaGetLastError(), "collect");
+  }
+}
+
+void SNUFFT::dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float const sigma, DataDual const kind) const
+{
+  auto const &m = *impl_;
+  auto const  xd = reinterpret_cast<float2 const *>(xhat);
+  Dual        d;
+  d.y = reinterpret_cast<float2 *>(y);
+  d.b = reinterpret_cast<float2 const *>(b);
+  d.sigma = sigma;
+  d.kind = int(kind);
+  for (int c = 0; c < m.geo.nC; c++) {
+    Expand<<<Blocks(m.geo.G), Threads>>>(m.geo, xd, m.maps.p, m.apo.p, m.ws.p, c, 1.f);
+    Check(cudaGetLastError(), "expand");
+    m.fft(true);
+    m.interp(c, false, nullptr, false, d);
+  }
 }
 
 } // namespace rl::gpu

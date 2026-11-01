@@ -49,6 +49,39 @@ struct SNUFFTTimes
   long   calls = 0;
 };
 
+// Data term of a primal-dual (PDHG) iteration, see SNUFFT::dataDualD
+enum class DataDual : int
+{
+  LS = 1,  // ½‖Ax - b‖², the k-space weights W only as the dual step (RIESLING's PDHG; Ong et al. 2019)
+  WLS = 2, // ½‖Ax - b‖²_W, the objective of RIESLING's ADMM / LSMR
+  LAD = 3  // ‖Ax - b‖₁ (least absolute deviations), W as the dual step
+};
+
+// Device memory held by host code (e.g. a solver's vectors), freed with the object
+class DeviceBuffer
+{
+public:
+  DeviceBuffer() = default;
+  explicit DeviceBuffer(size_t bytes);
+  ~DeviceBuffer();
+  DeviceBuffer(DeviceBuffer &&o) noexcept;
+  DeviceBuffer &operator=(DeviceBuffer &&o) noexcept;
+  DeviceBuffer(DeviceBuffer const &) = delete;
+  DeviceBuffer &operator=(DeviceBuffer const &) = delete;
+
+  template <typename T> auto as() const -> T * { return static_cast<T *>(p_); }
+  auto bytes() const -> size_t { return n_; }
+  void upload(void const *h, size_t bytes);
+  void download(void *h, size_t bytes) const;
+  void zero();
+
+private:
+  void  *p_ = nullptr;
+  size_t n_ = 0;
+};
+
+auto DeviceFreeBytes() -> size_t; // Free device memory now
+
 // Page-lock host memory (faster copies to and from the device); false if not possible
 auto PinHost(void *p, size_t bytes) -> bool;
 void UnpinHost(void *p);
@@ -70,6 +103,21 @@ public:
   auto deviceBytes() const -> size_t;                      // Device memory held
   auto times() const -> SNUFFTTimes;
   void resetTimes() const;
+
+  /* Device pointers, for solvers that keep their vectors on the device. Images as above; k-space in "device order":
+   * channel-major, nC x nK(), the valid samples in the operator's internal order. Asynchronous (default stream).
+   */
+  auto nK() const -> int64_t;                                 // Samples per channel in device order (= nValid())
+  void toDeviceOrder(Cxf const *k, Cxf *dk) const;            // Host k (nC, nSamp, nTrace) -> device dk
+  void fromDeviceOrder(Cxf const *dk, Cxf *k) const;          // Device dk -> host k (the invalid samples 0)
+  void forwardD(Cxf const *x, Cxf *y, float s) const;         // y = s A x
+  void adjointD(Cxf const *y, Cxf *x, float s, bool add) const; // x = s Aᴴ y, or x += s Aᴴ y with add
+  void normalD(Cxf const *x, Cxf *y, float s) const;          // y = s Aᴴ W A x
+  /* PDHG dual step of the data term, fused with the forward operator: u = y + σ W (A x̂ - b), then y = u / (1 + σW) (LS),
+   * u / (1 + σ) (WLS) or u / max(|u|, 1) (LAD). W: the k-space weights of the setup (1 without).
+   */
+  void dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float sigma, DataDual kind) const;
+  void sync() const; // Wait for the device
 
 private:
   struct Impl;
