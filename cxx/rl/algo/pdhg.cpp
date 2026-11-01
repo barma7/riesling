@@ -94,8 +94,8 @@ auto Run(CMap b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opt
   }
 
   float const L = StepL(E, P, regs, opts.λE);
-  float       σ = 1.f / std::sqrt(L);
-  float       τ = 1.f / std::sqrt(L);
+  float       σ = 1.f / std::sqrt(L * opts.ratio); // στ = 1/L, τ/σ = ratio
+  float       τ = std::sqrt(opts.ratio / L);
   float       α = 0.5f;
   float const s = 1.f;
   float const η = 0.95f;
@@ -219,8 +219,8 @@ auto Restarted(Index const nInner, CMap b, Op::Ptr E, Op::Ptr P, std::vector<Reg
   }
 
   float const L = StepL(E, P, regs, opts.λE);
-  float       σ = 1.f / std::sqrt(L);
-  float       τ = 1.f / std::sqrt(L);
+  float       σ = 1.f / std::sqrt(L * opts.ratio); // στ = 1/L, τ/σ = ratio
+  float       τ = std::sqrt(opts.ratio / L);
   float       α = 0.5f;
   float const s = 1.f;
   float const η = 0.95f;

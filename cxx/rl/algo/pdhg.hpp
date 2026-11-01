@@ -17,6 +17,7 @@ struct Opts
   bool  weighted = false; // Data term ½|Ax - b|²_P (ADMM's objective) instead of ½|Ax - b|² with P only as dual step
   Index imax;
   float tol, λE; // λE: λmax(A'PA), <= 0 to estimate it
+  float ratio = 1.f; // τ / σ, the primal over the dual step (στ = 1/L either way)
 };
 
 auto Run(Vector const &b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opts opts, Debug d = nullptr) -> Vector;

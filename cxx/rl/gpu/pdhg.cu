@@ -699,9 +699,9 @@ void RunPDHG(SNUFFT const                                    &A,
   for (auto const &t : s.terms) {
     L += t.norm2;
   }
-  float const sigma = 1.f / std::sqrt(L), tau = sigma;
+  float const sigma = 1.f / std::sqrt(L * s.ratio), tau = std::sqrt(s.ratio / L); // στ = 1/L
   log("λmax(AᴴWA) " + std::to_string(lamE) + (s.lambdaE > 0.f ? " (given)" : " (estimated, x 1.02)") + ", L " +
-      std::to_string(L) + ", σ = τ = " + std::to_string(sigma));
+      std::to_string(L) + ", σ " + std::to_string(sigma) + ", τ " + std::to_string(tau));
 
   size_t const need = PDHGDeviceBytes(s, A.nC(), A.nK()), avail = DeviceFreeBytes();
   log("Device memory for the iterations " + GB(need) + " (free " + GB(avail) + ")");

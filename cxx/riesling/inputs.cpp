@@ -82,14 +82,17 @@ PDHGArgs::PDHGArgs(args::Subparser &parser)
   , its(parser, "N", "Max iterations (4)", {"max-its", 'i'}, 128)
   , tol(parser, "B", "PDHG residual/Δ tolerance (1e-2)", {"pdhg-tol", 't'}, 1.e-4f)
   , λE(parser, "λE", "Max eigenvalue of the preconditioned encoding operator (default: estimated)", {"lambda-E", 'e'}, 0.f)
+  , ratio(parser, "R", "PDHG: primal over dual step size, τ/σ (default 1; στ = 1/L either way)", {"pdhg-ratio"}, 1.f)
 {
 }
 
 auto PDHGArgs::Get() -> rl::PDHG::Opts
 {
   if (lad && weighted) { throw rl::Log::Failure("PDHG", "--lad and --pdhg-weighted exclude each other"); }
+  if (!(ratio.Get() > 0.f)) { throw rl::Log::Failure("PDHG", "--pdhg-ratio must be positive"); }
   return rl::PDHG::Opts{
-    .adaptive = adaptive, .lad = lad, .weighted = weighted, .imax = its.Get(), .tol = tol.Get(), .λE = λE.Get()};
+    .adaptive = adaptive, .lad = lad, .weighted = weighted, .imax = its.Get(), .tol = tol.Get(), .λE = λE.Get(),
+    .ratio = ratio.Get()};
 }
 
 ADMMArgs::ADMMArgs(args::Subparser &parser)

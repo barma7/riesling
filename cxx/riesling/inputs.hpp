@@ -69,7 +69,7 @@ struct PDHGArgs
 {
   args::Flag             adaptive, lad, weighted;
   args::ValueFlag<Index> its;
-  args::ValueFlag<float> tol, λE;
+  args::ValueFlag<float> tol, λE, ratio;
 
   PDHGArgs(args::Subparser &parser);
   auto Get() -> rl::PDHG::Opts;

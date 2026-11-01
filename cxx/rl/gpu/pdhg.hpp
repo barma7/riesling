@@ -56,6 +56,7 @@ struct PDHGSetup
   float             tol = 1.e-4f;  // Stop when |Δx| / |x| < tol
   float             lambdaE = 0.f; // λmax(Aᴴ W A); <= 0: estimate it (Lanczos on the device, 2% margin)
   int               lanczosIts = 24;
+  float             ratio = 1.f;  // τ / σ (primal over dual step); στ = 1/L
 };
 
 struct PDHGStatus
