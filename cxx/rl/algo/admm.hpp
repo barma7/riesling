@@ -42,6 +42,10 @@ struct ADMM
   Opts                     opts;
   DebugX                   debug_x = nullptr;
   DebugZ                   debug_z = nullptr;
+  Op::Ptr                  AhWA = nullptr; // Optional Aᴴ W A in one operator (a GPU): CG uses it instead of A, Minv, Aᴴ
+  // Optional: page-lock host memory for the run (the CG vectors that AhWA reads and writes, for faster copies to a GPU).
+  // Returns a token that unlocks it when released.
+  std::function<std::shared_ptr<void>(void *, size_t)> pinHost = nullptr;
 
   auto run(Vector const &b) const -> Vector;
   auto run(CMap b) const -> Vector;

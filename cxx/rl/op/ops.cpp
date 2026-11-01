@@ -538,6 +538,53 @@ void DStack::iadjoint(CMap y, Map x, float const s) const
   this->finishAdjoint(x, time, true);
 }
 
+LeadingBlock::LeadingBlock(Ptr o, Index const nn)
+  : Op("Leading")
+  , op{o}
+  , n{nn}
+{
+  if (op->rows() != op->cols() || op->cols() > n) {
+    throw Log::Failure(name, "Operator is {}x{}, expected square and at most {}", op->rows(), op->cols(), n);
+  }
+}
+
+auto LeadingBlock::rows() const -> Index { return n; }
+auto LeadingBlock::cols() const -> Index { return n; }
+
+void LeadingBlock::forward(CMap x, Map y, float const s) const
+{
+  auto const  time = this->startForward(x, y, false);
+  Index const c = op->cols();
+  op->forward(CMap(x.data(), c), Map(y.data(), c), s);
+  y.segment(c, n - c).setZero();
+  this->finishForward(y, time, false);
+}
+
+void LeadingBlock::adjoint(CMap y, Map x, float const s) const
+{
+  auto const  time = this->startAdjoint(y, x, false);
+  Index const c = op->cols();
+  op->adjoint(CMap(y.data(), c), Map(x.data(), c), s);
+  x.segment(c, n - c).setZero();
+  this->finishAdjoint(x, time, false);
+}
+
+void LeadingBlock::iforward(CMap x, Map y, float const s) const
+{
+  auto const  time = this->startForward(x, y, true);
+  Index const c = op->cols();
+  op->iforward(CMap(x.data(), c), Map(y.data(), c), s);
+  this->finishForward(y, time, true);
+}
+
+void LeadingBlock::iadjoint(CMap y, Map x, float const s) const
+{
+  auto const  time = this->startAdjoint(y, x, true);
+  Index const c = op->cols();
+  op->iadjoint(CMap(y.data(), c), Map(x.data(), c), s);
+  this->finishAdjoint(x, time, true);
+}
+
 Extract::Extract(Index const cols, Index const st, Index const rows)
   : Op("Extrct")
   , r{rows}

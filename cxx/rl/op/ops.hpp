@@ -156,6 +156,23 @@ struct DStack final : Op
   std::vector<std::shared_ptr<Op>> ops;
 };
 
+/* [op 0; 0 0] for a square op on a longer vector: op on the first op->cols() entries, zeros after them. The same as
+ * Extractᴴ op Extract with an Extract from 0 (e.g. TGV's [x; v]), without Multiply's temporaries.
+ */
+struct LeadingBlock final : Op
+{
+  OP_INHERIT
+  LeadingBlock(Ptr op, Index const n);
+  void forward(CMap x, Map y, float const s = 1.f) const;
+  void adjoint(CMap y, Map x, float const s = 1.f) const;
+  void iforward(CMap x, Map y, float const s = 1.f) const;
+  void iadjoint(CMap y, Map x, float const s = 1.f) const;
+
+private:
+  Ptr   op;
+  Index n;
+};
+
 struct Extract final : Op
 {
   OP_INHERIT

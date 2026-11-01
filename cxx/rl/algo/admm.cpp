@@ -7,6 +7,8 @@
 #include "iter.hpp"
 #include "lsmr.hpp"
 
+#include <future>
+
 namespace rl {
 
 auto ADMM::run(Vector const &b) const -> Vector { return run(CMap{b.data(), b.rows()}); }
@@ -67,8 +69,11 @@ auto ADMM::run(CMap b) const -> Vector
    * q = Aᴴ W A x up to date from the products it computes anyway, so the warm start costs no extra pass of A.
    */
   Vector bʹ, AhWb, q;
+  if (AhWA && (AhWA->rows() != A->cols() || AhWA->cols() != A->cols())) {
+    throw Log::Failure("ADMM", "AᴴWA is {}x{}, expected {}x{}", AhWA->rows(), AhWA->cols(), A->cols(), A->cols());
+  }
   if (opts.cg) {
-    Log::Print("ADMM", "x-update: CG on the normal equations");
+    Log::Print("ADMM", "x-update: CG on the normal equations{}", AhWA ? ", AᴴWA in one operator" : "");
     Vector Wb(A->rows());
     if (Minv) {
       Minv->forward(b, Map(Wb.data(), Wb.size()));
@@ -95,7 +100,8 @@ auto ADMM::run(CMap b) const -> Vector
     maxZ = std::max(maxZ, rg.T ? rg.T->rows() : cols);
   }
   auto const  pad = [](Index const n) { return (n + 15) / 16 * 16; }; // Keeps each vector aligned for Map
-  Index const cgSize = opts.cg ? 4 * pad(cols) + pad(A->rows()) + (Minv ? pad(A->rows()) : 0) + pad(maxT) : 0;
+  Index const nyA = AhWA ? 0 : A->rows(), nyW = (!AhWA && Minv) ? A->rows() : 0; // k-space work vectors
+  Index const cgSize = opts.cg ? 4 * pad(cols) + pad(nyA) + pad(nyW) + pad(maxT) : 0;
   Index const zuSize = 2 * pad(maxZ) + pad(cols);
   Vector      work;
   auto const  carve = [&work, &pad](std::initializer_list<Index> const sizes) { // Consecutive vectors in work
@@ -108,9 +114,11 @@ auto ADMM::run(CMap b) const -> Vector
     return v;
   };
   if (opts.cg) { work.resize(std::max(cgSize, zuSize)); }
+  std::shared_ptr<void> pinned; // p and Ap (work vectors 1 and 2 of the CG); released before work
+  if (opts.cg && AhWA && pinHost) { pinned = pinHost(work.data() + pad(cols), 2 * pad(cols) * sizeof(Cx)); }
 
   auto cgUpdate = [&](Index const imax) {
-    auto v = carve({cols, cols, cols, cols, A->rows(), Minv ? A->rows() : 0, maxT});
+    auto v = carve({cols, cols, cols, cols, nyA, nyW, maxT});
     Map &r = v[0], &p = v[1], &Ap = v[2], &Gp = v[3], &yA = v[4], &yW = v[5], &t = v[6];
     // r = Aᴴ W b - q + ρ Σ F_iᴴ (z_i - u_i - F_i x)
     r.device(dev) = AhWb - q;
@@ -129,13 +137,20 @@ auto ADMM::run(CMap b) const -> Vector
     Log::Print("CG", "IT |r|       α         |x|");
     Log::Print("CG", "00 {:4.3E}", std::sqrt(rr));
     for (Index ii = 0; ii < imax; ii++) {
-      // Ap = Aᴴ W A p, Gp = ρ Σ F_iᴴ F_i p
-      A->forward(CMap(p.data(), cols), yA);
-      if (Minv) {
-        Minv->forward(CMap(yA.data(), yA.size()), yW);
-        A->adjoint(CMap(yW.data(), yW.size()), Ap);
+      /* Ap = Aᴴ W A p, Gp = ρ Σ F_iᴴ F_i p. A single AᴴWA (on a GPU) runs on its own thread while the regularizer terms
+       * run here on the CPU threads: both only read p.
+       */
+      std::future<void> ApDone;
+      if (AhWA) {
+        ApDone = std::async(std::launch::async, [&] { AhWA->forward(CMap(p.data(), cols), Ap); });
       } else {
-        A->adjoint(CMap(yA.data(), yA.size()), Ap);
+        A->forward(CMap(p.data(), cols), yA);
+        if (Minv) {
+          Minv->forward(CMap(yA.data(), yA.size()), yW);
+          A->adjoint(CMap(yW.data(), yW.size()), Ap);
+        } else {
+          A->adjoint(CMap(yA.data(), yA.size()), Ap);
+        }
       }
       for (Index ir = 0; ir < R; ir++) {
         if (regs[ir].T) {
@@ -153,6 +168,7 @@ auto ADMM::run(CMap b) const -> Vector
           Gp.device(dev) += p * ρ;
         }
       }
+      if (ApDone.valid()) { ApDone.get(); }
       // pᴴ N p is real for the Hermitian N; its imaginary part is rounding only, so take the real part
       float const pNp = std::real(ParallelDot(p, Ap)) + std::real(ParallelDot(p, Gp));
       if (!(pNp > 0.f)) {

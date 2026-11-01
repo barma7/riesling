@@ -7,6 +7,7 @@
 #include "rl/log/log.hpp"
 #include "rl/op/pad.hpp"
 #include "rl/op/recon.hpp"
+#include "rl/op/sense-nufft-gpu.hpp"
 #include "rl/precon.hpp"
 #include "rl/scaling.hpp"
 #include "rl/sense/sense.hpp"
@@ -99,6 +100,10 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
         }
       };
       ADMM opt{A, R.M, reg, admmArgs.Get(), debug_x, nullptr};
+      if (R.N) {
+        opt.AhWA = ext_x ? std::make_shared<Ops::LeadingBlock>(R.N, A->cols()) : Ops::Op::Ptr(R.N);
+        opt.pinHost = TOps::HostPinner();
+      }
       auto x = opt.run(CollapseToConstVector(nc));
       if (ext_x) { x = ext_x->forward(x); }
       if (scale != 1.f) { x.device(Threads::CoreDevice()) = x / Cx(scale); }
@@ -171,6 +176,10 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
       }
     };
     ADMM opt{A, R.M, reg, admmArgs.Get(), debug_x, debug_z};
+    if (R.N) {
+      opt.AhWA = ext_x ? std::make_shared<Ops::LeadingBlock>(R.N, A->cols()) : Ops::Op::Ptr(R.N);
+      opt.pinHost = TOps::HostPinner();
+    }
     x = opt.run(CollapseToConstVector(noncart));
   }
   if (ext_x) { x = ext_x->forward(x); }
