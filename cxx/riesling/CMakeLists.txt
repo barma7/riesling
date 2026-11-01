@@ -40,6 +40,7 @@ if(BUILD_BIN)
         # op/ndft.cpp
         op/nufft.cpp
         op/prox.cpp
+        op/recon.cpp
         op/sense.cpp
         op/pad.cpp
         op/rss.cpp

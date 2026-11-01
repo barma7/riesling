@@ -66,6 +66,7 @@ int main(int const argc, char const *const argv[])
   COMMAND(op, nufft2, "op-nufft2", "Apply forward/adjoint 2D NUFFT");
   COMMAND(op, pad, "op-pad", "Pad/crop an image");
   COMMAND(op, prox, "op-prox", "Apply Proximal operators");
+  COMMAND(op, op_recon, "op-recon", "Apply a recon normal operator Aᴴ M A (timing)");
   COMMAND(op, op_sense, "op-sense", "Channel combine with SENSE");
   COMMAND(op, wavelets, "op-wavelets", "Apply wavelet transform");
 
