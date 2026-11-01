@@ -546,6 +546,36 @@ auto LanczosMaxD(SNUFFT const &A, Vol const &g, int const its, std::function<voi
   return float(lam);
 }
 
+// Device time per phase of the iteration (CUDA events), for the log
+struct PhaseTimer
+{
+  static constexpr int N = 7;
+  cudaEvent_t          ev[N];
+  double               ms[N - 1] = {};
+  PhaseTimer()
+  {
+    for (auto &e : ev) {
+      Check(cudaEventCreate(&e), "event");
+    }
+  }
+  ~PhaseTimer()
+  {
+    for (auto &e : ev) {
+      cudaEventDestroy(e);
+    }
+  }
+  void mark(int const i) { Check(cudaEventRecord(ev[i]), "event record"); }
+  void add() // After the last mark of an iteration
+  {
+    Check(cudaEventSynchronize(ev[N - 1]), "event sync");
+    for (int i = 0; i < N - 1; i++) {
+      float t = 0.f;
+      Check(cudaEventElapsedTime(&t, ev[i], ev[i + 1]), "event elapsed");
+      ms[i] += t;
+    }
+  }
+};
+
 auto GB(size_t const b) -> std::string
 {
   char s[32];
@@ -696,14 +726,18 @@ void RunPDHG(SNUFFT const                                    &A,
   }
 
   Reducer             red;
+  PhaseTimer          tm;
+  int64_t             nIts = 0;
   std::mt19937        gen(std::random_device{}());
   std::vector<float2> hx;
   for (int64_t it = 0; it < s.maxIts; it++) {
     auto const X = bX.as<Cxf>(), Xh = bXh.as<Cxf>();
     // Dual steps at x̂: y = prox*_σ(y + σ K x̂)
+    tm.mark(0);
     for (int64_t t = 0; t < s.nT; t++) {
       A.dataDualD(Xh + t * nX, bYd.as<Cxf>() + t * nCK, bB.as<Cxf>() + t * nCK, sigma, s.data);
     }
+    tm.mark(1);
     for (size_t ir = 0; ir < s.terms.size(); ir++) {
       auto const &t = s.terms[ir];
       if (t.P == ProxKind::LLR) {
@@ -721,14 +755,21 @@ void RunPDHG(SNUFFT const                                    &A,
       }
     }
     // Primal step x = x - τ Kᴴ y (G = 0), then x̂ = 2 x - x_old; x̂ holds x_old meanwhile
+    tm.mark(2);
     Check(cudaMemcpyAsync(Xh, X, nP * sizeof(float2), cudaMemcpyDeviceToDevice), "copy");
+    tm.mark(3);
     for (int64_t t = 0; t < s.nT; t++) {
       A.adjointD(bYd.as<Cxf>() + t * nCK, X + t * nX, -tau, true);
     }
+    tm.mark(4);
     for (size_t ir = 0; ir < s.terms.size(); ir++) {
       TermAdjoint(s.terms[ir], s, bY[ir].as<Cxf>(), X, -tau);
     }
+    tm.mark(5);
     auto const [nx2, ndx2] = red.extrapolate(reinterpret_cast<float2 *>(X), reinterpret_cast<float2 *>(Xh), nP);
+    tm.mark(6);
+    tm.add();
+    nIts++;
     PDHGStatus const st{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
     bool const       go = status(st);
     if (debug && debugEvery > 0 && it % debugEvery == 0) {
@@ -741,6 +782,14 @@ void RunPDHG(SNUFFT const                                    &A,
       log("Δ tolerance reached");
       break;
     }
+  }
+  if (nIts) {
+    char m[256];
+    std::snprintf(m, sizeof(m),
+                  "Device time per iteration (ms): data dual %.0f, regularizer duals %.0f, copy %.0f, data adjoint %.0f, "
+                  "regularizer adjoints %.0f, extrapolation %.0f",
+                  tm.ms[0] / nIts, tm.ms[1] / nIts, tm.ms[2] / nIts, tm.ms[3] / nIts, tm.ms[4] / nIts, tm.ms[5] / nIts);
+    log(m);
   }
   bX.download(x, g.nI * sizeof(float2));
 }
