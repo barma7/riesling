@@ -79,7 +79,7 @@ PDHGArgs::PDHGArgs(args::Subparser &parser)
   , lad(parser, "L", "Least Absolute Deviations, PDHG only", {"lad", 'l'})
   , weighted(parser, "W", "PDHG: weight the data term by the k-space weights (ADMM's objective), not only the dual steps",
              {"pdhg-weighted"})
-  , its(parser, "N", "Max iterations (4)", {"max-its", 'i'}, 128)
+  , its(parser, "N", "Max iterations (128)", {"max-its", 'i'}, 128)
   , check(parser, "N", "PDHG: residuals every N iterations, stop when both < --pdhg-tol (0: off; GPU only)", {"pdhg-check"}, 0)
   , tol(parser, "B", "PDHG: stop when |Δx|/|x| < tol, with --pdhg-check when both relative residuals are (1e-4; 0: never)",
         {"pdhg-tol", 't'}, 1.e-4f)
