@@ -18,6 +18,7 @@ struct Opts
   Index imax;
   float tol, λE; // λE: λmax(A'PA), <= 0 to estimate it
   float ratio = 1.f; // τ / σ, the primal over the dual step (στ = 1/L either way)
+  bool  autoRatio = false; // Start from the data, then adapt to (|x|/|y|)² at 50, 100, ... (pdhg.cpp, DataRatio)
 };
 
 auto Run(Vector const &b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opts opts, Debug d = nullptr) -> Vector;

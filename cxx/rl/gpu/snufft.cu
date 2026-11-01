@@ -536,6 +536,36 @@ __global__ void FromDeviceOrder(float2 const *__restrict__ dk, int const *__rest
   k[c + (long long)nC * idx[is]] = dk[i];
 }
 
+// Partial sums (per block, double) of |y|² / W over a k-space vector in device order
+__global__ void InvWeightedNorm2(float2 const *__restrict__ y, float4 const *__restrict__ off, float const *__restrict__ wch,
+                                 long long const n, int const nC, double *__restrict__ part, bool const inverse)
+{
+  __shared__ double sh[256];
+  double            a = 0.;
+  for (long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x; i < n * nC; i += (long long)gridDim.x * blockDim.x) {
+    float const  W = wch ? wch[i] : off[i % n].w;
+    float2 const v = y[i];
+    double const m = double(v.x) * v.x + double(v.y) * v.y;
+    a += inverse ? m / W : m * W;
+  }
+  sh[threadIdx.x] = a;
+  __syncthreads();
+  for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+    if (threadIdx.x < o) { sh[threadIdx.x] += sh[threadIdx.x + o]; }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) { part[blockIdx.x] = sh[0]; }
+}
+
+__global__ void WeightK(float2 *__restrict__ y, float4 const *__restrict__ off, float const *__restrict__ wch, long long const n,
+                        int const nC)
+{
+  long long const i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (i >= n * nC) { return; }
+  float const W = wch ? wch[i] : off[i % n].w;
+  y[i] = make_float2(y[i].x * W, y[i].y * W);
+}
+
 struct SNUFFT::Impl
 {
   SNUFFTSetup set;
@@ -958,6 +988,47 @@ auto SNUFFT::nK() const -> int64_t { return impl_->nValid; }
 auto SNUFFT::nC() const -> int64_t { return impl_->set.nC; }
 
 void SNUFFT::sync() const { Check(cudaDeviceSynchronize(), "sync"); }
+
+namespace {
+// Σ W^±1 |y|² over a k-space vector in device order
+auto WeightedNorm2(float2 const *y, float4 const *off, float const *wch, long long const n, int const nC, bool const inverse)
+  -> double
+{
+  int const    nb = 1024;
+  DBuf<double> part;
+  part.alloc(nb);
+  InvWeightedNorm2<<<nb, 256>>>(y, off, wch, n, nC, part.p, inverse);
+  Check(cudaGetLastError(), "weighted norm");
+  std::vector<double> h(nb);
+  Check(cudaMemcpy(h.data(), part.p, nb * sizeof(double), cudaMemcpyDeviceToHost), "copy norm");
+  double s = 0.;
+  for (auto const v : h) {
+    s += v;
+  }
+  return s;
+}
+} // namespace
+
+auto SNUFFT::dualNorm2D(Cxf const *y) const -> double
+{
+  auto const &m = *impl_;
+  return WeightedNorm2(reinterpret_cast<float2 const *>(y), m.off.p, m.wch.n ? m.wch.p : nullptr, m.nValid, int(m.set.nC), true);
+}
+
+auto SNUFFT::weightedNorm2D(Cxf const *y) const -> double
+{
+  auto const &m = *impl_;
+  return WeightedNorm2(reinterpret_cast<float2 const *>(y), m.off.p, m.wch.n ? m.wch.p : nullptr, m.nValid, int(m.set.nC),
+                       false);
+}
+
+void SNUFFT::weightD(Cxf *y) const
+{
+  auto const     &m = *impl_;
+  long long const n = m.nValid * m.set.nC;
+  WeightK<<<Blocks(n), Threads>>>(reinterpret_cast<float2 *>(y), m.off.p, m.wch.n ? m.wch.p : nullptr, m.nValid, int(m.set.nC));
+  Check(cudaGetLastError(), "weight");
+}
 
 void SNUFFT::toDeviceOrder(Cxf const *k, Cxf *dk) const
 {

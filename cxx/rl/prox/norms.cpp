@@ -190,6 +190,15 @@ template <int O, int D> L2<O, D>::L2(float const λ_, Sz<O> const &s, Sz<D> cons
   std::set_difference(all.cbegin(), all.cend(), normDims.cbegin(), normDims.cend(), otherDims.begin());
 }
 
+template <int O, int D> auto L2<O, D>::dualBound2() const -> double
+{
+  double blocks = 1.;
+  for (auto const d : otherDims) {
+    blocks *= shape[d];
+  }
+  return double(λ) * λ * blocks;
+}
+
 template <int O, int D> void L2<O, D>::apply(float const α, Map x) const
 {
   Eigen::TensorMap<CxN<O>> xm(x.data(), shape);

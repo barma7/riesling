@@ -20,6 +20,7 @@ auto RunGPU(Cx5 const                                 &data,
   s.tol = opts.tol;
   s.lambdaE = opts.λE;
   s.ratio = opts.ratio;
+  s.autoRatio = opts.autoRatio;
   s.nT = data.dimension(4);
   Index const                   nTP = data.dimension(0) * data.dimension(1) * data.dimension(2);
   std::vector<gpu::Cxf const *> b(s.nT);

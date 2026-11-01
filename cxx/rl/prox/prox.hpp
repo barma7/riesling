@@ -20,6 +20,10 @@ struct Prox
   void         conj(float const α, Vector &x) const;
   virtual void conj(float const α, Map x) const = 0;
 
+  /* Upper bound of |y|² for y in the set the conjugate prox projects onto (λ per element, block or patch for the norms):
+   * the size of the dual solution, for PDHG's automatic step ratio. 0 if not known. */
+  virtual auto dualBound2() const -> double { return 0.; }
+
   virtual ~Prox() {};
 
   Index sz;

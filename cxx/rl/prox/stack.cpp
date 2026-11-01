@@ -29,6 +29,15 @@ void Stack::apply(float const α, Map x) const
   }
 }
 
+auto Stack::dualBound2() const -> double
+{
+  double s = 0.;
+  for (auto const &p : proxs) {
+    s += p->dualBound2();
+  }
+  return s;
+}
+
 void Stack::conj(float const α, Map x) const
 {
   Index st = 0;

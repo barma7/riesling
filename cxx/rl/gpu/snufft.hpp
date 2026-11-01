@@ -119,6 +119,10 @@ public:
    */
   void dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float sigma, DataDual kind) const;
   void sync() const; // Wait for the device
+  // Σ |y|² / W over a k-space vector in device order: the norm of a data-term dual in the metric of its dual step σW
+  auto dualNorm2D(Cxf const *y) const -> double;
+  auto weightedNorm2D(Cxf const *y) const -> double; // Σ W |y|² (|b|²_W)
+  void weightD(Cxf *y) const;                        // y = W y in device order
 
 private:
   struct Impl;

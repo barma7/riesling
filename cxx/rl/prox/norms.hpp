@@ -15,6 +15,7 @@ struct L1 final : Prox
   L1(float const λ, CMap b, Ops::Op::Ptr P);
   void apply(float const α, Map x) const;
   void conj(float const α, Map x) const;
+  auto dualBound2() const -> double { return double(λ) * λ * sz; }
 
 private:
   CMap const   b;
@@ -29,6 +30,7 @@ struct L1I final : Prox
   L1I(float const λ, Index const sz);
   void apply(float const α, Map x) const;
   void conj(float const α, Map x) const;
+  auto dualBound2() const -> double { return double(λ) * λ * sz; }
 
 private:
   Ops::Op::Ptr P;
@@ -43,6 +45,7 @@ template <int O, int D> struct L2 final : Prox
   L2(float const λ, Sz<O> const &shape, Sz<D> const &dims);
   void apply(float const α, Map x) const;
   void conj(float const α, Map x) const;
+  auto dualBound2() const -> double; // λ² x the number of blocks
 
 private:
   Sz<O>     shape;

@@ -583,6 +583,67 @@ auto GB(size_t const b) -> std::string
   return s;
 }
 
+// Upper bound of |y|² for the dual of a term: the conjugate prox projects onto a set of radius λ per block (L1, L1I: per
+// element; L2: per norm block; LLR: spectral norm λ per window, so |.|_F² <= λ² min(rows, columns) of its window block)
+auto DualBound2(Term const &t, PDHGSetup const &s) -> double
+{
+  int const       G = Components(t.T);
+  long long const N = s.nx * s.ny * s.nz;
+  double const    l2 = double(t.lambda) * t.lambda;
+  if (t.P == ProxKind::L2) {
+    int const S[3] = {int(s.nB), int(s.nT), G};
+    double    blocks = double(N);
+    for (int d = 0; d < 3; d++) {
+      if (!((t.normMask >> (3 + d)) & 1u)) { blocks *= S[d]; }
+    }
+    return l2 * blocks;
+  } else if (t.P == ProxKind::LLR) {
+    double const W3 = double(t.llrWindow) * t.llrWindow * t.llrWindow;
+    return l2 * std::min(W3, double(s.nB * s.nT)) * (double(N) / W3);
+  }
+  return l2 * double(N * s.nB * s.nT * G);
+}
+
+/*
+ * Starting value of the automatic step ratio, from the data, before any iteration: the iterates estimate |x*| and |y*|
+ * badly while the ratio is far off (a small ratio keeps x small, which pushes the estimate further down). |x*| from one
+ * exact line-search step of the weighted least squares from 0, x̃ = α AᴴWb, α = |AᴴWb|² / <AᴴWb, AᴴWA AᴴWb>; the data
+ * dual from its residual, |W(Ax̃ - b)|²_W⁻¹ = |b|²_W - α |AᴴWb|²; the terms' duals from their bounds (DualBound2).
+ * Uses X, X̂ and the data dual as scratch and leaves them zero.
+ */
+auto DataRatio(SNUFFT const &A, PDHGSetup const &s, Vol const &g, DeviceBuffer &bX, DeviceBuffer &bXh, DeviceBuffer &bYd,
+               DeviceBuffer const &bB, long long const nCK, Reducer &red, std::function<void(std::string const &)> const &log)
+  -> double
+{
+  long long const nX = g.N * g.nB;
+  double          n1 = 0., q = 0., bW = 0.;
+  for (int64_t t = 0; t < s.nT; t++) {
+    auto const X = bX.as<Cxf>() + t * nX, Xh = bXh.as<Cxf>() + t * nX;
+    auto const Y = bYd.as<Cxf>() + t * nCK;
+    auto const B = bB.as<Cxf>() + t * nCK;
+    Check(cudaMemcpy(Y, B, nCK * sizeof(float2), cudaMemcpyDeviceToDevice), "copy");
+    A.weightD(Y);
+    A.adjointD(Y, X, 1.f, false); // AᴴWb
+    A.normalD(X, Xh, 1.f);        // AᴴWA AᴴWb
+    auto const x = reinterpret_cast<float2 const *>(X);
+    n1 += red.dot(x, x, nX);
+    q += red.dot(x, reinterpret_cast<float2 const *>(Xh), nX);
+    bW += A.weightedNorm2D(B);
+  }
+  double const alpha = n1 / q, x2 = alpha * alpha * n1, yd2 = std::max(bW - alpha * n1, 0.);
+  double       yr2 = 0.;
+  for (auto const &t : s.terms) {
+    yr2 += DualBound2(t, s);
+  }
+  double const r = x2 / (yd2 + yr2);
+  log("Step ratio from the data: |x̃|² " + std::to_string(x2) + ", |y_data|² " + std::to_string(yd2) + ", |y_terms|² <= " +
+      std::to_string(yr2) + ": τ/σ " + std::to_string(r));
+  bX.zero();
+  bXh.zero();
+  bYd.zero();
+  return r;
+}
+
 } // namespace
 
 auto TermRows(Transform const T, int64_t const n) -> int64_t { return Components(T) * n; }
@@ -699,7 +760,8 @@ void RunPDHG(SNUFFT const                                    &A,
   for (auto const &t : s.terms) {
     L += t.norm2;
   }
-  float const sigma = 1.f / std::sqrt(L * s.ratio), tau = std::sqrt(s.ratio / L); // στ = 1/L
+  float ratio = s.ratio;
+  float sigma = 1.f / std::sqrt(L * ratio), tau = std::sqrt(ratio / L); // στ = 1/L
   log("λmax(AᴴWA) " + std::to_string(lamE) + (s.lambdaE > 0.f ? " (given)" : " (estimated, x 1.02)") + ", L " +
       std::to_string(L) + ", σ " + std::to_string(sigma) + ", τ " + std::to_string(tau));
 
@@ -727,7 +789,12 @@ void RunPDHG(SNUFFT const                                    &A,
 
   Reducer             red;
   PhaseTimer          tm;
-  int64_t             nIts = 0;
+  int64_t             nIts = 0, nextRatio = 50;
+  if (s.autoRatio) {
+    ratio = float(DataRatio(A, s, g, bX, bXh, bYd, bB, nCK, red, log));
+    sigma = 1.f / std::sqrt(L * ratio);
+    tau = std::sqrt(ratio / L);
+  }
   std::mt19937        gen(std::random_device{}());
   std::vector<float2> hx;
   for (int64_t it = 0; it < s.maxIts; it++) {
@@ -772,6 +839,38 @@ void RunPDHG(SNUFFT const                                    &A,
     nIts++;
     PDHGStatus const st{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
     bool const       go = status(st);
+    /* Automatic step ratio. The PDHG error after k iterations is bounded by (|x* - x0|² / τ + |y* - y0|²_Σ⁻¹) / k
+     * (Chambolle & Pock 2011); with στ fixed that is smallest for τ / σ = (|x* - x0| / |y* - y0|)², the dual norm in the
+     * metric of the dual steps (|y|² / W for the data term). It starts from the data (DataRatio); from x0 = y0 = 0 the
+     * iterates then estimate the norms. As the "primal weight" of PDLP (Applegate et al. 2021) the ratio moves halfway
+     * there in log space, here at iterations 50, 100, 200, ... and by at most a factor 2: few changes, so the steps
+     * settle.
+     */
+    if (s.autoRatio && it + 1 == nextRatio) {
+      nextRatio *= 2;
+      double yd2 = 0., yd2plain = 0., yr2 = 0.;
+      for (int64_t t = 0; t < s.nT; t++) {
+        yd2 += A.dualNorm2D(bYd.as<Cxf>() + t * nCK);
+        yd2plain += red.dot(bYd.as<float2>() + t * nCK, bYd.as<float2>() + t * nCK, nCK);
+      }
+      for (size_t ir = 0; ir < s.terms.size(); ir++) {
+        auto const y = bY[ir].as<float2>();
+        yr2 += red.dot(y, y, TermRows(s.terms[ir].T, g.nI));
+      }
+      double const y2 = yd2 + yr2;
+      log("|x|² " + std::to_string(nx2) + " |y_data|²_W⁻¹ " + std::to_string(yd2) + " (plain " + std::to_string(yd2plain) +
+          ") |y_terms|² " + std::to_string(yr2));
+      if (y2 > 0. && nx2 > 0.) {
+        double const target = nx2 / y2;
+        float const  r = std::clamp(float(std::exp(0.5 * std::log(target) + 0.5 * std::log(double(ratio)))), ratio / 2.f,
+                                    2.f * ratio);
+        log("Step ratio τ/σ " + std::to_string(ratio) + " -> " + std::to_string(r) + " (target (|x|/|y|)² " +
+            std::to_string(target) + ")");
+        ratio = r;
+        sigma = 1.f / std::sqrt(L * ratio);
+        tau = std::sqrt(ratio / L);
+      }
+    }
     if (debug && debugEvery > 0 && it % debugEvery == 0) {
       hx.resize(nP);
       bX.download(hx.data(), nP * sizeof(float2));

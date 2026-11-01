@@ -57,6 +57,7 @@ struct PDHGSetup
   float             lambdaE = 0.f; // λmax(Aᴴ W A); <= 0: estimate it (Lanczos on the device, 2% margin)
   int               lanczosIts = 24;
   float             ratio = 1.f;  // τ / σ (primal over dual step); στ = 1/L
+  bool              autoRatio = false; // Start ratio from the data, then adapt to (|x|/|y|)² at 50, 100, ... (RunPDHG)
 };
 
 struct PDHGStatus

@@ -26,6 +26,13 @@ template <int D> LLR<D>::LLR(float const l, Index const p, Index const w, bool c
   Log::Print("LLR", "λ {} Scaled λ {} Patch {} Window {} M {} N {} Shape {}", l, λ, patchSize, windowSize, M, N, shape);
 }
 
+template <int D> auto LLR<D>::dualBound2() const -> double
+{
+  double const W3 = double(windowSize) * windowSize * windowSize;
+  double const N = double(Product(LastN<D - 3>(shape)));
+  return double(λ) * λ * std::min(W3, N) * (double(Product(FirstN<3>(shape))) / W3);
+}
+
 template <int D> void LLR<D>::apply(float const α, Map xin) const
 {
   CxNCMap<D>     x(xin.data(), shape);

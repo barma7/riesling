@@ -22,6 +22,7 @@ struct LLR final : Prox
 
   void apply(float const α, Map x) const;
   void conj(float const α, Map x) const;
+  auto dualBound2() const -> double; // Spectral norm λ per window block: λ² min(window rows, images) per window
 };
 
 } // namespace rl::Proxs

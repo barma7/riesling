@@ -14,6 +14,7 @@ struct Stack final : Prox
 
   void apply(float const α, Map x) const;
   void conj(float const α, Map x) const;
+  auto dualBound2() const -> double;
 
 private:
   std::vector<Ptr> proxs;
