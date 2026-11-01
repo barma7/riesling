@@ -20,7 +20,7 @@ The extent of the non-cartesian k-space is scaled as -N/2 to N/2 in each dimensi
 When do I need Sample Density Compensation?
 -------------------------------------------
 
-You don't. As of version 1, ``riesling`` uses pre-conditioned iterative algorithms everywhere, including for the basic NUFFT. SDC factors are surprisingly difficult to calculate correctly or quickly, whereas Frank Ong's k-space preconditioner is correct and fast. See `F. Ong, M. Uecker, and M. Lustig, ‘Accelerating Non-Cartesian MRI Reconstruction Convergence Using k-Space Preconditioning’, IEEE Trans. Med. Imaging, vol. 39, no. 5, pp. 1646–1654, May 2020<https://ieeexplore.ieee.org/document/8906069/>`_.
+You don't. As of version 1, ``riesling`` uses pre-conditioned iterative algorithms everywhere, including for the basic NUFFT. SDC factors are surprisingly difficult to calculate correctly or quickly, whereas Frank Ong's k-space preconditioner is correct and fast. See `F. Ong, M. Uecker, and M. Lustig, ‘Accelerating Non-Cartesian MRI Reconstruction Convergence Using k-Space Preconditioning’, IEEE Trans. Med. Imaging, vol. 39, no. 5, pp. 1646–1654, May 2020 <https://ieeexplore.ieee.org/document/8906069/>`_.
 
 Do I need to supply sensitivity maps?
 -------------------------------------
@@ -47,9 +47,9 @@ This depends very much on your data. For straightforward single-image reconstruc
 Which algorithm should I pick?
 ------------------------------
 
-There are to my knowledge only two general purpose algorithms for solving such problems across typical regularizers - ADMM and PDHG. The adaptive version of ADMM in ``riesling`` is essentially parameter-free, but requires expensive solves for the inner problem. This makes it very slow to converge. In contrast PDHG requires a step-size which is determined by the largest eigenvalue of the encoding matrix, which must be found by power iteration before running the reconstruction. This eigenvalue will be constant for a particular trajectory, so can be calculated beforehand.
+There are to my knowledge only two general purpose algorithms for solving such problems across typical regularizers - ADMM and PDHG. The adaptive version of ADMM in ``riesling`` is essentially parameter-free, but requires solves for the inner problem (by default a fixed number of warm-started Conjugate Gradient iterations). PDHG needs no inner solve, but its step sizes depend on the largest eigenvalue of the encoding matrix and on the ratio of the primal to the dual step.
 
-As of version v1.03 I recommend using PDHG with a precomputed eigenvalue. However, because this requires an extra step and is not robust, ADMM remains the default.
+The eigenvalue is now estimated automatically at the start of a PDHG run (``riesling eig`` is no longer needed), and the step ratio can be chosen automatically with ``--pdhg-auto-ratio``. If your problem fits in GPU memory, PDHG on the GPU (``--pdhg --gpu --pdhg-weighted --pdhg-auto-ratio --pdhg-term-steps``) is usually the fastest choice. Otherwise ADMM, which keeps its state in host memory and can still use the GPU for the encoding operator (``--gpu``), is the robust default. See :doc:`design` for details.
 
 Should I denoise or regularize?
 -------------------------------

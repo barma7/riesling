@@ -1,7 +1,7 @@
 Reconstruction
 ==============
 
-The main reconstruction tool you should use is `riesling recon-rlsq`_. This solves the regularized least-squares reconstruction problem using the Alternating-Directions Method-of-Multipliers algorithm. It supports several common regularizers including L1-wavelets, Total Variation and Total Generalized Variation. To run an unregularized reconstruction use `riesling recon-lsq`_. ``recon-lsq`` and ``recon-rlsq`` will self-calibrate sensitivity maps from the input data if no maps are supplied. These can be calculated explicitly with the `sense-calib`_ command, see there for details of the calibration.
+The main reconstruction tool you should use is `recon-rlsq`_. This solves the regularized least-squares reconstruction problem using the Alternating-Directions Method-of-Multipliers algorithm. It supports several common regularizers including L1-wavelets, Total Variation and Total Generalized Variation. To run an unregularized reconstruction use `recon-lsq`_. ``recon-lsq`` and ``recon-rlsq`` will self-calibrate sensitivity maps from the input data if no maps are supplied. These can be calculated explicitly with the `sense-calib`_ command, see there for details of the calibration.
 
 * `recon-lsq`_
 * `recon-rlsq`_
@@ -35,9 +35,13 @@ The main reconstruction tool you should use is `riesling recon-rlsq`_. This solv
 
     3D non-cartesian reconstructions can consume large amounts of memory. By default RIESLING will reconstruct all channels simultaneously, requiring that both the oversampled grid and the sensitivity maps for each are held in RAM. Enabling this option swaps to a scheme where only one grid and sensitivity map are kept in RAM. This requires repeating the NUFFT calculations for each channel, trading memory size for reconstruction speed.
 
+* ``--gpu``
+
+    Run the SENSE + NUFFT operator on a CUDA GPU. Requires a build with ``-DRL_CUDA=ON`` (see the README). Only for 3D single-slab reconstructions, and not with ``--lowmem`` or ``--decant``. The GPU operator is the same operator as the CPU's to floating-point rounding (same kernel, apodization and scaling), so results do not change. ``recon-rlsq`` then uses it in the ADMM x-update, or, with ``--pdhg``, runs the whole PDHG iteration on the GPU. See :doc:`design`.
+
 * ``--precon=none/kspace/file``
 
-    Choose a diagonal k-space preconditioner. The default is Frank Ong's preconditioner. See `F. Ong, M. Uecker, and M. Lustig, ‘Accelerating Non-Cartesian MRI Reconstruction Convergence Using k-Space Preconditioning’, IEEE Trans. Med. Imaging, vol. 39, no. 5, pp. 1646–1654, May 2020<https://ieeexplore.ieee.org/document/8906069/>`_.
+    Choose a diagonal k-space preconditioner. The default is Frank Ong's preconditioner. See `F. Ong, M. Uecker, and M. Lustig, ‘Accelerating Non-Cartesian MRI Reconstruction Convergence Using k-Space Preconditioning’, IEEE Trans. Med. Imaging, vol. 39, no. 5, pp. 1646–1654, May 2020 <https://ieeexplore.ieee.org/document/8906069/>`_.
 
 recon-lsq
 ---------
@@ -67,7 +71,7 @@ Reconstructs the image as the least-squares solution to an inverse problem. The 
 recon-rlsq
 ----------
 
-By default, uses the Alternating Directions Method-of-Multipliers (ADMM) to add regularizers to the least-squares reconstruction problem. This is similar to the BART ``pics`` command. See `S. Boyd, ‘Distributed Optimization and Statistical Learning via the Alternating Direction Method of Multipliers’ doi: 10.1561/2200000016 <http://www.nowpublishers.com/article/Details/MAL-016>`_. The Primal Dual Hybrid Gradient (PDHG) algorithm is also implemented and faster than ADMM, but it requires the calculation of the maximum eigenvalue of the encoding operator (using ``riesling eig``).
+By default, uses the Alternating Directions Method-of-Multipliers (ADMM) to add regularizers to the least-squares reconstruction problem. This is similar to the BART ``pics`` command. See `S. Boyd, ‘Distributed Optimization and Statistical Learning via the Alternating Direction Method of Multipliers’ doi: 10.1561/2200000016 <http://www.nowpublishers.com/article/Details/MAL-016>`_. The Primal Dual Hybrid Gradient (PDHG) algorithm is also implemented. Its step sizes are derived from the maximum eigenvalue of the encoding operator, which is estimated at the start of the run. With ``--gpu`` the whole PDHG iteration runs on the GPU, which is usually the fastest option when the problem fits in GPU memory. The design of both solvers and the reasoning behind their options are described in :doc:`design`.
 
 *Usage*
 
@@ -89,9 +93,9 @@ See `denoise`_. The same regularizers are available for ``recon-rlsq``.
 
     The Alternating-Directions Method-of-Multipliers is a very robust algorithm for solving non-smooth regularized least-squares. However, it requires solving an inverse problem on every iteration, which itself must be solved using an iterative scheme. This means it can be very slow. However, there is only parameter for the algorithm (rho) and the adaptive scheme implemented in riesling means that you should not have to adjust the default parameter. ADMM is hence currently the default choice as it is essentially guaranteed to converge to a sensible answer, given enough iterations.
 
-* ``--max-its1=N``, ``--max-its0=N``--atol=A``, ``--btol=B``, ``--ctol=C``
+* ``--max-its0=N``, ``--max-its1=N``, ``--atol=A``, ``--btol=B``, ``--ctol=C``
 
-    These control the inner optimization for ADMM (the x update step). As this step is warm-started, it is possible to control the maximum number of iterations for the zeroth and subsequent steps independently. The tolerances only apply to LSMR.
+    These control the inner optimization for ADMM (the x update step). As this step is warm-started, it is possible to control the maximum number of iterations for the zeroth and subsequent steps independently (default 64 each). The tolerances only apply to LSMR: the CG x-update always runs exactly this many iterations. Because it is warm-started, far fewer are usually enough; around 10 per outer iteration is a good starting point, and more inner iterations often reach a given accuracy in less total time than very few.
 
 * ``--admm-inner=cg/lsmr``
 
@@ -99,39 +103,67 @@ See `denoise`_. The same regularizers are available for ``recon-rlsq``.
 
 * ``--split-time``
 
-    Solve each time point (e.g. echo) as its own ADMM problem, one after the other. When the regularizers do not couple time points (no ``t`` in ``--iso``, no ``--tvt`` or ``--llr``, no wavelets over the time dimension) the problem is a sum of independent problems, so the solution is the same, but only one time point's ADMM state is in memory at a time. The data scale is computed from all time points together, as without this option. Each time point gets its own ADMM penalty and stopping test. Only for ADMM.
+    Solve each time point (e.g. echo) as its own problem, one after the other. When the regularizers do not couple time points (no ``t`` in ``--iso``, no ``--tvt`` or ``--llr``, no wavelets over the time dimension) the problem is a sum of independent problems, so the solution is the same, but only one time point's solver state is in memory at a time. The data scale is computed from all time points together, as without this option. Each time point gets its own ADMM penalty and stopping test. Works with ADMM and PDHG (CPU and GPU); not with off-resonance correction.
 
 * ``--max-outer-its=N``
 
-    The maximum number of ADMM iterations. The default is 20 but a higher number (50 or more) may be required for optimal image quality.
+    The maximum number of ADMM iterations (default 64).
 
 * ``--eps=E``
 
-    Primal and dual convergence tolerance for ADMM. Default value is 0.01.
+    Primal and dual convergence tolerance for ADMM. Default value is 1e-3.
 
 * ``--rho=P``
 
     Coupling factor for ADMM. The default value of 1 is robust, and will be adjusted inside the algorithm according to `ADMM Penalty Parameter Selection by Residual Balancing <http://arxiv.org/abs/1704.06209>`_.
 
+* ``--mu=M``, ``--tau=T``
+
+    Residual balancing rescales ρ when the primal and dual residuals differ by more than a factor ``mu`` (default 10, the value suggested by Boyd et al.); ``tau`` limits the rescaling factor (default 10). Earlier versions used ``mu`` = 1.2, which with an inexact x-update rescales ρ on almost every iteration and slows convergence; ``--mu=1.2`` restores that behaviour.
+
 *PDHG Options*
 
-    The preconditioned Primal-Dual Hybrid Gradient is potentially must faster than ADMM as it does not require an inner solve. However, if the step lengths are incorrectly chosen it will not converge.
+    The preconditioned Primal-Dual Hybrid Gradient does not require an inner solve, so its iterations are much cheaper than ADMM's. Its convergence depends on the step sizes; these are now derived from the operator norms and, optionally, chosen automatically. For problems that fit in GPU memory, ``--pdhg --gpu --pdhg-weighted --pdhg-auto-ratio --pdhg-term-steps`` is the suggested starting point, with ``--pdhg-check=10`` to stop on accuracy. See :doc:`design` for the reasoning behind each option.
 
 * ``--pdhg``
 
-    Switches to the PDHG algorithm instead of ADMM.
+    Switches to the PDHG algorithm instead of ADMM. With ``--gpu`` the whole iteration (operator, regularizers, vector updates) runs on the GPU, for every regularizer of ``recon-rlsq``. The run stops with a message if the problem does not fit in GPU memory; ``--split-time``, a smaller basis or fewer regularizers reduce it.
 
-* ``--adaptive``
+* ``--pdhg-weighted``
 
-    Enables adaptive step-sizes for PDHG, which can lead to faster convergence. However, calculating the step-sizes requires additional applications of the encoding operator, such that each iteration will likely be slower and more memory is required. Use with caution.
+    Weight the data term by the k-space preconditioner weights, i.e. minimise the same objective as ADMM. Without it PDHG minimises the unweighted least-squares problem and uses the weights only as its dual step size (Ong et al.), so its solution and suitable λ differ from ADMM's. Not with ``--lad``.
+
+* ``--lad``
+
+    Least absolute deviations data term (L1 norm of the residual) instead of least squares.
 
 * ``--lambda-E=l``
 
-    The maximum eigenvalue of the encoding operator. Care has been taken to scale all the regularizer operators such that their maximum eigenvalues are 1 (see e.g. `W. G. Bickley and J. McNamee, ‘Eigenvalues and eigenfunctions of finite-difference operators’, Math. Proc. Camb. Phil. Soc., vol. 57, no. 3, pp. 532–546, Jul. 1961, doi: 10.1017/S0305004100035593.<https://www.cambridge.org/core/product/identifier/S0305004100035593/type/journal_article>`_). The preconditioner should make the maximum eigenvalue of the encoding operator close to 1, and hence the default values of 1 should converge. However, for certain pathological trajectories (particularly subspace recons) the maximum eigenvalue may be very different, and must be pre-calculated using ``riesling eig``.
+    The maximum eigenvalue of the preconditioned encoding operator, used for the step sizes. By default it is estimated at the start of the run with a few Lanczos iterations, so ``riesling eig`` is no longer needed; give a value to skip the estimate. The step sizes also include an upper bound of each regularizer transform's norm (e.g. 2 for the first TGV term), so that the convergence condition holds.
 
-* ``--max-its=N``, ``--pdhg-tol=t``
+* ``--pdhg-ratio=R``
 
-    Termination conditions for PDHG, namely the maximum number of iterations and the tolerance. In adaptive mode, this is a tolerance on the primal and dual residuals. For naïve PDHG, this is a tolerance on the norm of the change to the image.
+    The ratio τ/σ of the primal to the dual step size (default 1). Only their product is fixed by the convergence condition, and the best ratio depends on the data scale, λ and the regularizers; values of 10–100 are common. Useful when the same kind of reconstruction is repeated and the ratio has been tuned.
+
+* ``--pdhg-auto-ratio``
+
+    Choose τ/σ automatically: a first estimate from the data, then a few damped updates from the iterates (at iterations 50, 100, 200, …). Overrides ``--pdhg-ratio``. Not with ``--adaptive`` or ``--pdhg-restart``.
+
+* ``--pdhg-term-steps``
+
+    Use a separate dual step size per regularizer term and a separate primal step for the image and TGV's auxiliary field (Pock & Chambolle's diagonal preconditioning, applied to blocks), instead of one σ and one τ. Combine with ``--pdhg-auto-ratio``. GPU only.
+
+* ``--max-its=N``, ``--pdhg-tol=t``, ``--pdhg-check=N``
+
+    Termination conditions for PDHG: the maximum number of iterations (default 128) and the tolerance (default 1e-4). By default PDHG stops when the relative change of the image falls below the tolerance. With ``--pdhg-check=N`` (GPU only) it instead computes the relative primal and dual residuals every N iterations and stops when both are below the tolerance, which tracks the distance to the solution more reliably; with N = 10 this costs a few percent of the run time. ``--pdhg-tol=0`` always runs ``--max-its`` iterations. In adaptive mode the tolerance applies to the primal residual.
+
+* ``--adaptive``
+
+    Enables adaptive step-sizes for PDHG (Goldstein et al.), which can lead to faster convergence. However, calculating the step-sizes requires additional applications of the encoding operator, such that each iteration will likely be slower and more memory is required. Use with caution. CPU only.
+
+* ``--pdhg-restart=R``
+
+    Restarted averaged PDHG: runs blocks of R iterations, restarts each block from the average of the previous block's iterates, and returns the final average. The tolerance only ends the current block early. CPU only, not with ``--pdhg-auto-ratio``.
 
 recon-rss
 ---------
@@ -247,11 +279,11 @@ Multiple regularizers can be specified simultaneously, each with a different reg
 
 * ``--tgv=λ``, ``--tgvl2=λ``
 
-    `Total Generalized Variation <http://doi.wiley.com/10.1002/mrm.22595>`_ and `TGV on the L2 voxelwise norm <http://ieeexplore.ieee.org/document/7466848/>`_. The latter is useful for multichannel images. Note that due to the way the TGV problem is formulated, it consumes significantly more memory and is slower than TV for the same data.
+    `Total Generalized Variation <http://doi.wiley.com/10.1002/mrm.22595>`_ and `TGV on the L2 voxelwise norm <http://ieeexplore.ieee.org/document/7466848/>`_. The latter is useful for multichannel images. Note that due to the way the TGV problem is formulated, it consumes significantly more memory and is slower than TV for the same data. TGV can be combined with the other regularizers, which then act on the image. The adjoints of TGV's operators are now exact (earlier versions weighted the second-order term about twice its nominal λ), so λ values tuned with earlier versions may need re-tuning.
 
 * ``--iso=b|g|bg|bt|gt|bgt``
 
-    Isotropic or joint denoising on the specified dimensions (basis, spatial gradients, time) for TV, TV2, TGV or L1. Not all regularizers support all combinations. See `F. Knoll, M. Holler, T. Koesters, R. Otazo, K. Bredies, and D. K. Sodickson, ‘Joint MR-PET Reconstruction Using a Multi-Channel Image Regularizer’, IEEE Trans. Med. Imaging, vol. 36, no. 1, pp. 1–16, Jan. 2017, doi: 10.1109/TMI.2016.2564989.<http://ieeexplore.ieee.org/document/7466848/>`_.
+    Isotropic or joint denoising on the specified dimensions (basis, spatial gradients, time) for TV, TV2, TGV or L1. Not all regularizers support all combinations. For ``--l1`` only ``b``, ``t`` and ``bt`` apply (earlier versions normed the wrong dimensions). See `F. Knoll, M. Holler, T. Koesters, R. Otazo, K. Bredies, and D. K. Sodickson, ‘Joint MR-PET Reconstruction Using a Multi-Channel Image Regularizer’, IEEE Trans. Med. Imaging, vol. 36, no. 1, pp. 1–16, Jan. 2017, doi: 10.1109/TMI.2016.2564989. <http://ieeexplore.ieee.org/document/7466848/>`_.
 
 * ``--llr=λ``, ``--llr-patch=N``, ``--llr-win=N``, ``--llr-shift``
 

@@ -1,5 +1,28 @@
 ## Changelog
 
+# Unreleased (dev-opt)
+
+Faster and leaner regularized reconstructions, an optional GPU path, and fixes to the regularizers and the PDHG step
+sizes. Background and references: `docs/design.rst`.
+
+- Speed, same results: optional CPU-specific builds (`bootstrap.sh -a native`); load-balanced and vectorized 3D
+  gridding (also more accurate at the k-space centre); a fused SENSE + NUFFT operator without the channel-image
+  temporary; one-pass kernels for the SENSE adjoint, the TV/TGV gradients and the isotropic L2 prox; ADMM vector
+  operations on all threads, its work vectors allocated once, faster norms.
+- ADMM: the x-update now uses CG on the normal equations by default (`--admm-inner=lsmr` for the previous solver): less
+  memory, no extra operator pass for the warm start. The residual-balancing tolerance `--mu` defaults to 10 (was 1.2).
+- `--split-time` solves independent time points one after the other (ADMM and PDHG), so only one is in memory.
+- GPU (build option `RL_CUDA`, option `--gpu`): a CUDA SENSE + NUFFT operator, the same operator as the CPU's; the ADMM
+  x-update uses its normal operator; `--pdhg --gpu` runs the whole PDHG iteration on the GPU for every regularizer.
+- PDHG: step sizes from the estimated eigenvalue of the encoding operator and the regularizers' norm bounds (`riesling
+  eig` is no longer needed); `--pdhg-weighted` (ADMM's objective); `--pdhg-ratio` and `--pdhg-auto-ratio` for the
+  primal/dual step ratio; per-term step sizes `--pdhg-term-steps` and a residual stopping test `--pdhg-check` (GPU).
+- Fixes that change results: exact adjoints of the divergence, TGV's symmetrized gradient and the Laplacians (the TGV
+  objective changes, λ may need re-tuning); TGV can be combined with other regularizers (they were ignored); `--l1` with
+  `--iso` normed the wrong dimensions.
+- Smaller: `op-recon` for timing a recon's normal operator; `op-grid --fwd` with Cartesian input; zero-padded
+  milliseconds in log durations; DUCC is fetched from GitHub.
+
 # v1.03
 
 - The 🐛 edition. Sadly some bugs to do with data ordering and subspace recon had slipped into v1.02. These have been fixed.

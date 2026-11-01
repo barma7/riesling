@@ -9,6 +9,7 @@ Note that all of these operators are defined with the forward, default, directio
 * `nufft`_
 * `pad`_
 * `prox`_
+* `recon`_
 * `sense`_
 
 grid
@@ -91,7 +92,7 @@ The second option ``X,Y,Z`` is a comma-delimited set of numbers indicating the r
     Changes the operation to work on 6D ``channels`` datasets. The extra dimension (channels) is also not affected.
 
 prox
----
+----
 
 Applies a proximal operator, i.e. regularization to an image. Useful to check what the impact of the regularizer during ``admm`` will be. See the ADMM documentation for how the regularizers work. Only the straightforward regularizers available in ``admm`` are available in ``prox``. For instance, TGV regularization is formalated as two simultaneous optimization problems and so cannot be applied to a standalone image.
 
@@ -105,6 +106,27 @@ Applies a proximal operator, i.e. regularization to an image. Useful to check wh
 
 ``file-prox.h5`` containing the regularized ``image`` dataset.
 
+
+recon
+-----
+
+``riesling op-recon`` builds the operator of a reconstruction as ``recon-lsq`` and ``recon-rlsq`` do (SENSE, basis, k-space weights, ``--gpu``) and applies its normal operator :math:`A^H M A` repeatedly to :math:`x_0 = A^H M b`, logging the time of each application. It writes :math:`x_0` and the last result. It is meant for timing the operator (e.g. with and without ``--gpu``) and for comparing implementations on real data.
+
+*Usage*
+
+.. code-block:: bash
+
+    riesling op-recon input.h5 output.h5 --gpu
+
+*Important Options*
+
+* ``--repeat=N``
+
+    Number of applications of the normal operator (default 3).
+
+* ``--grid-adj=file.h5``
+
+    Write the GPU gridding adjoint of the data (no FFT), in the layout of ``op-grid --adj``, to the file and stop. Used to check the accuracy of the GPU spreading against the CPU gridding.
 
 sense
 -----

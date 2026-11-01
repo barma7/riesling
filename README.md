@@ -108,3 +108,20 @@ In the `riesling` folder execute
 ```
 $ ./bootstrap.sh
 ```
+
+### 3. Optional build settings
+- **CPU-specific build.** `./bootstrap.sh -a native` (CMake option `RL_ARCH`) compiles for this
+  machine's instruction set (e.g. AVX2/FMA or AVX-512), which is noticeably faster than the portable
+  default. Other values: `x86-64-v3` (AVX2 + FMA), `x86-64-v4` (AVX-512). The binary then only runs on
+  CPUs that support them.
+- **GPU (CUDA).** The `--gpu` options need a build with `RL_CUDA`. Install the CUDA toolkit (nvcc and
+  cuFFT), then reconfigure the build tree created by `bootstrap.sh` and rebuild:
+  ```
+  $ cmake -B build -DRL_CUDA=ON
+  $ cmake --build build
+  ```
+  The code is compiled for the GPUs in this machine unless `CMAKE_CUDA_ARCHITECTURES` is set (e.g. `75`
+  for Turing). Set `CMAKE_CUDA_HOST_COMPILER` if nvcc does not accept the default host compiler. The tests
+  (`build/cxx/test/riesling-tests`) then include the GPU tests (tag `[gpu]`).
+
+See `docs/design.rst` for what the CPU, GPU and solver changes do.
