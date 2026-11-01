@@ -50,15 +50,12 @@ inline void BackwardDiff(T1 const &a, T2 &&b, Sz<N> const shape, Index const dim
     b.slice(f0, sz1).device(Threads::TensorDevice()) +=
       (a.slice(f0, sz1) - a.slice(fm1, sz1)) * b.slice(fm1, sz1).constant(s / 2.f);
   } else {
-    /* KNOWN ISSUE (found 2026-10-31, left as is on purpose): the interior points are scaled by s here but by s / 2 in the
-     * forward branch above (the wrap point uses s / 2 in both), so this is ~2x the true adjoint of BackwardDiff<true>.
-     * Dot test <x, F'Fx> / |Fx|^2 at n = 12: Div<3,3> 1.92, GradVec<4,3> 1.92 (= 2 - 1/12), Grad<3,3> 1.00. In TGV the
-     * second-order term |ε(v)| hence has about twice its nominal weight. Changing it changes the TGV objective (λ would
-     * need re-tuning), so it is kept, and the fused GradVec kernels below reproduce it. test/op/grad.cpp, which only checks
-     * eigenvalues of F'F, is not built (commented out in test/CMakeLists.txt).
+    /* The adjoint of the branch above: weight s / 2 at every point. Until 2026-11 the interior points had weight s,
+     * about twice the true adjoint (dot test <x, F'Fx> / |Fx|^2 = 1.92 for Div<3,3> and GradVec<4,3> at n = 12), which
+     * doubled the weight of the second-order TGV term |ε(v)| and broke the adjoint that PDHG and the step sizes assume.
      */
     Log::Debug("Grad", "Adjoint backward differences dim {}", dim);
-    b.slice(f0, sz).device(Threads::TensorDevice()) += (a.slice(f0, sz) - a.slice(fp1, sz)) * b.slice(f0, sz).constant(s);
+    b.slice(f0, sz).device(Threads::TensorDevice()) += (a.slice(f0, sz) - a.slice(fp1, sz)) * b.slice(f0, sz).constant(s / 2.f);
     b.slice(fm1, sz1).device(Threads::TensorDevice()) +=
       (a.slice(fm1, sz1) - a.slice(f0, sz1)) * b.slice(f0, sz1).constant(s / 2.f);
   }
@@ -67,8 +64,7 @@ inline void BackwardDiff(T1 const &a, T2 &&b, Sz<N> const shape, Index const dim
  * Fused 3D gradients over dims 0, 1, 2 for a batch of V volumes, circular boundaries, used for the 5D / 6D shapes of the
  * TV and TGV regularizers. The slice expressions above make one pass over the data per difference (3 for Grad, 9 for
  * GradVec) and ran 10-20x slower than memory bandwidth allows. These compute the same differences with the same
- * coefficients in one pass. The GradVec adjoint keeps the weights of BackwardDiff<false> (interior s, last point s/2),
- * so results do not change. Note that these weights make it about 2x the true adjoint of BackwardDiff<true>.
+ * coefficients in one pass. The adjoints are the exact adjoints of the forward kernels.
  */
 struct Vol3
 {
@@ -155,28 +151,23 @@ template <bool add> void GradVec3Forward(Cx const *x, Cx *y, Vol3 const g, float
   });
 }
 
-// Adjoint as in BackwardDiff<false>: with A_d(u; w) = (u[i] - u[i + e_d]) * (w, or w / 2 at the last point along d),
-// x0 (+)= A_0(y0; sd) + A_1(y3; so) + A_2(y4; so), x1 (+)= A_0(y3; so) + A_1(y1; sd) + A_2(y5; so),
-// x2 (+)= A_0(y4; so) + A_1(y5; so) + A_2(y2; sd)
-template <bool add> void GradVec3Adjoint(Cx const *y, Cx *x, Vol3 const g, float const sd, float const so)
+// Adjoint of GradVec3Forward: with A_d(u) = u[i] - u[i + e_d],
+// x0 (+)= cd A_0(y0) + co (A_1(y3) + A_2(y4)), x1 (+)= co A_0(y3) + cd A_1(y1) + co A_2(y5),
+// x2 (+)= co (A_0(y4) + A_1(y5)) + cd A_2(y2)
+template <bool add> void GradVec3Adjoint(Cx const *y, Cx *x, Vol3 const g, float const cd, float const co)
 {
   Index const NV = g.NV();
-  ForRows(g, [&](Index const o, Index const j, Index const k, Index, Index const ojp, Index, Index const okp) {
+  ForRows(g, [&](Index const o, Index, Index, Index, Index const ojp, Index, Index const okp) {
     Cx const *y0 = y + o, *y1 = y + NV + o, *y2 = y + 2 * NV + o, *y3 = y + 3 * NV + o, *y4 = y + 4 * NV + o,
              *y5 = y + 5 * NV + o;
     Cx const *y1j = y + NV + ojp, *y3j = y + 3 * NV + ojp, *y5j = y + 5 * NV + ojp;
     Cx const *y2k = y + 2 * NV + okp, *y4k = y + 4 * NV + okp, *y5k = y + 5 * NV + okp;
     Cx       *x0 = x + o, *x1 = x + NV + o, *x2 = x + 2 * NV + o;
-    bool const  lastj = j + 1 == g.ny, lastk = k + 1 == g.nz;
-    float const sdj = lastj ? sd / 2.f : sd, soj = lastj ? so / 2.f : so;
-    float const sdk = lastk ? sd / 2.f : sd, sok = lastk ? so / 2.f : so;
     for (Index i = 0; i < g.nx; i++) {
-      bool const  lasti = i + 1 == g.nx;
-      Index const ip = lasti ? 0 : i + 1;
-      float const sdi = lasti ? sd / 2.f : sd, soi = lasti ? so / 2.f : so;
-      Put<add>(x0[i], (y0[i] - y0[ip]) * sdi + (y3[i] - y3j[i]) * soj + (y4[i] - y4k[i]) * sok);
-      Put<add>(x1[i], (y3[i] - y3[ip]) * soi + (y1[i] - y1j[i]) * sdj + (y5[i] - y5k[i]) * sok);
-      Put<add>(x2[i], (y4[i] - y4[ip]) * soi + (y5[i] - y5j[i]) * soj + (y2[i] - y2k[i]) * sdk);
+      Index const ip = i + 1 == g.nx ? 0 : i + 1;
+      Put<add>(x0[i], (y0[i] - y0[ip]) * cd + (y3[i] - y3j[i]) * co + (y4[i] - y4k[i]) * co);
+      Put<add>(x1[i], (y3[i] - y3[ip]) * co + (y1[i] - y1j[i]) * cd + (y5[i] - y5k[i]) * co);
+      Put<add>(x2[i], (y4[i] - y4[ip]) * co + (y5[i] - y5j[i]) * co + (y2[i] - y2k[i]) * cd);
     }
   });
 }
@@ -380,7 +371,7 @@ template <int ND, int NG> void GradVec<ND, NG>::adjoint(OutCMap y, InMap x, floa
       auto const  time = this->startAdjoint(y, x, false);
       float const scale = s / std::sqrt(2 * NG * (NG + 1) / 2);
       float const scale2 = scale / std::sqrt(2);
-      GradVec3Adjoint<false>(y.data(), x.data(), Vol3{x.dimension(0), x.dimension(1), x.dimension(2), x.dimension(3) * x.dimension(4)}, scale, scale2);
+      GradVec3Adjoint<false>(y.data(), x.data(), Vol3{x.dimension(0), x.dimension(1), x.dimension(2), x.dimension(3) * x.dimension(4)}, scale / 2.f, scale2 / 2.f);
       this->finishAdjoint(x, time, false);
       return;
     }
@@ -400,7 +391,7 @@ template <int ND, int NG> void GradVec<ND, NG>::iadjoint(OutCMap y, InMap x, flo
   if constexpr (ND == 6 && NG == 3) {
     if (IsXYZ<NG>(dims_)) {
       float const scale2 = scale / std::sqrt(2);
-      GradVec3Adjoint<true>(y.data(), x.data(), Vol3{x.dimension(0), x.dimension(1), x.dimension(2), x.dimension(3) * x.dimension(4)}, scale, scale2);
+      GradVec3Adjoint<true>(y.data(), x.data(), Vol3{x.dimension(0), x.dimension(1), x.dimension(2), x.dimension(3) * x.dimension(4)}, scale / 2.f, scale2 / 2.f);
       this->finishAdjoint(x, time, false);
       return;
     }

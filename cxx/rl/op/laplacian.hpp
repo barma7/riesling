@@ -29,7 +29,7 @@ struct IsoΔ3D final : TOp<ND, ND>
   void iadjoint(OutCMap y, InMap x, float const s = 1.f) const;
 
 private:
-void doIt(InCMap x, OutMap y, float const s = 1.f) const;
+void doIt(InCMap x, OutMap y, float const s, bool const adj) const; // adj: the transpose, x and y swapped
 };
 
 } // namespace rl::TOps

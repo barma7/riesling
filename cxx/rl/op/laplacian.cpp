@@ -21,6 +21,23 @@ template <typename T1, typename T2, typename SzT> inline auto Laplace0(T1 const 
     (a.slice(f0, sz) * a.slice(f0, sz).constant(1.f / 3.f) - a.slice(fp1, sz) * a.slice(fp1, sz).constant(1.f / 6.f) -
      a.slice(fm1, sz) * a.slice(fm1, sz).constant(1.f / 6.f));
 }
+
+/* Transpose of Laplace0. Laplace0 writes the interior points only, so its transpose is not Laplace0 itself: the boundary
+ * points receive the contributions of their interior neighbours. Scatter form: b(i) += a(i) / 3, b(i ± 1) -= a(i) / 6
+ * for the interior points i.
+ */
+template <typename T1, typename T2, typename SzT> inline auto Laplace0Adj(T1 const &a, T2 &&b, SzT const dims, Index const dim)
+{
+  auto         sz = dims;
+  decltype(sz) fm1, f0, fp1;
+  fp1[dim] = 2;
+  fm1[dim] = 0;
+  f0[dim] = 1;
+  sz[dim] -= 2;
+  b.slice(f0, sz).device(Threads::TensorDevice()) += a.slice(f0, sz) * a.slice(f0, sz).constant(1.f / 3.f);
+  b.slice(fp1, sz).device(Threads::TensorDevice()) -= a.slice(f0, sz) * a.slice(f0, sz).constant(1.f / 6.f);
+  b.slice(fm1, sz).device(Threads::TensorDevice()) -= a.slice(f0, sz) * a.slice(f0, sz).constant(1.f / 6.f);
+}
 } // namespace
 
 template <int ND> Laplacian<ND>::Laplacian(InDims const ish)
@@ -50,9 +67,9 @@ template <int ND> void Laplacian<ND>::adjoint(OutCMap y, InMap x, float const s)
   auto const time = this->startAdjoint(y, x, false);
   CxN<ND>    temp(ishape);
   temp.setZero();
-  Laplace0(y, temp, y.dimensions(), 0);
-  Laplace0(y, temp, y.dimensions(), 1);
-  Laplace0(y, temp, y.dimensions(), 2);
+  Laplace0Adj(y, temp, y.dimensions(), 0);
+  Laplace0Adj(y, temp, y.dimensions(), 1);
+  Laplace0Adj(y, temp, y.dimensions(), 2);
   x.device(Threads::TensorDevice()) = temp * temp.constant(-s/2.f);
   this->finishAdjoint(x, time, false);
 }
@@ -74,9 +91,9 @@ template <int ND> void Laplacian<ND>::iadjoint(OutCMap y, InMap x, float const s
   auto const time = this->startAdjoint(y, x, false);
   CxN<ND>    temp(ishape);
   temp.setZero();
-  Laplace0(y, temp, y.dimensions(), 0);
-  Laplace0(y, temp, y.dimensions(), 1);
-  Laplace0(y, temp, y.dimensions(), 2);
+  Laplace0Adj(y, temp, y.dimensions(), 0);
+  Laplace0Adj(y, temp, y.dimensions(), 1);
+  Laplace0Adj(y, temp, y.dimensions(), 2);
   x.device(Threads::TensorDevice()) -= temp * temp.constant(s/2.f);
   this->finishAdjoint(x, time, false);
 }
@@ -91,7 +108,7 @@ template <int ND> IsoΔ3D<ND>::IsoΔ3D(InDims const ish)
 
 template <int ND> auto IsoΔ3D<ND>::Make(InDims const ish) -> std::shared_ptr<IsoΔ3D> { return std::make_shared<IsoΔ3D>(ish); }
 
-template <int ND> void IsoΔ3D<ND>::doIt(InCMap x, OutMap y, float const s) const
+template <int ND> void IsoΔ3D<ND>::doIt(InCMap x, OutMap y, float const s, bool const adj) const
 {
   auto const  time = this->startForward(x, y, false);
 
@@ -151,17 +168,32 @@ template <int ND> void IsoΔ3D<ND>::doIt(InCMap x, OutMap y, float const s) cons
     }
   }
 
-  auto o = y.slice(so, sz);
-  o.device(Threads::TensorDevice()) +=
-    o.constant(s / (48.f * std::sqrt(28.3))) *
-    (o.constant(-200.f) * x.slice(so, sz) +
-     o.constant(20.f) * (x.slice(NN[0], sz) + x.slice(NN[1], sz) + x.slice(NN[2], sz) + x.slice(NN[3], sz) +
-                      x.slice(NN[4], sz) + x.slice(NN[5], sz)) +
-     o.constant(6.f) * (x.slice(NNN[0], sz) + x.slice(NNN[1], sz) + x.slice(NNN[2], sz) + x.slice(NNN[3], sz) +
-                      x.slice(NNN[4], sz) + x.slice(NNN[5], sz) + x.slice(NNN[6], sz) + x.slice(NNN[7], sz) +
-                      x.slice(NNN[8], sz) + x.slice(NNN[9], sz) + x.slice(NNN[10], sz) + x.slice(NNN[11], sz)) +
-     o.constant(1.f) * (x.slice(NNNN[0], sz) + x.slice(NNNN[1], sz) + x.slice(NNNN[2], sz) + x.slice(NNNN[3], sz) +
-                      x.slice(NNNN[4], sz) + x.slice(NNNN[5], sz) + x.slice(NNNN[6], sz) + x.slice(NNNN[7], sz)));
+  float const c = s / (48.f * std::sqrt(28.3));
+  if (!adj) {
+    auto o = y.slice(so, sz);
+    o.device(Threads::TensorDevice()) +=
+      o.constant(c) *
+      (o.constant(-200.f) * x.slice(so, sz) +
+       o.constant(20.f) * (x.slice(NN[0], sz) + x.slice(NN[1], sz) + x.slice(NN[2], sz) + x.slice(NN[3], sz) +
+                           x.slice(NN[4], sz) + x.slice(NN[5], sz)) +
+       o.constant(6.f) * (x.slice(NNN[0], sz) + x.slice(NNN[1], sz) + x.slice(NNN[2], sz) + x.slice(NNN[3], sz) +
+                          x.slice(NNN[4], sz) + x.slice(NNN[5], sz) + x.slice(NNN[6], sz) + x.slice(NNN[7], sz) +
+                          x.slice(NNN[8], sz) + x.slice(NNN[9], sz) + x.slice(NNN[10], sz) + x.slice(NNN[11], sz)) +
+       o.constant(1.f) * (x.slice(NNNN[0], sz) + x.slice(NNNN[1], sz) + x.slice(NNNN[2], sz) + x.slice(NNNN[3], sz) +
+                          x.slice(NNNN[4], sz) + x.slice(NNNN[5], sz) + x.slice(NNNN[6], sz) + x.slice(NNNN[7], sz)));
+  } else {
+    /* Transpose: the stencil writes the interior points only, so each interior point of x (here the input) scatters to
+     * its neighbours in y. Not the stencil itself next to the boundary.
+     */
+    auto const xi = x.slice(so, sz);
+    auto const scatter = [&](Sz<ND> const &st, float const w) {
+      y.slice(st, sz).device(Threads::TensorDevice()) += xi * xi.constant(c * w);
+    };
+    scatter(so, -200.f);
+    for (auto const &st : NN) { scatter(st, 20.f); }
+    for (auto const &st : NNN) { scatter(st, 6.f); }
+    for (auto const &st : NNNN) { scatter(st, 1.f); }
+  }
 
   this->finishForward(y, time, false);
 }
@@ -170,7 +202,7 @@ template <int ND> void IsoΔ3D<ND>::forward(InCMap x, OutMap y, float const s) c
 {
   auto const time = this->startForward(x, y, false);
   y.setZero();
-  doIt(x, y, s);
+  doIt(x, y, s, false);
   this->finishForward(y, time, false);
 }
 
@@ -178,21 +210,21 @@ template <int ND> void IsoΔ3D<ND>::adjoint(OutCMap y, InMap x, float const s) c
 {
   auto const time = this->startAdjoint(y, x, false);
   x.setZero();
-  doIt(y, x, s);
+  doIt(y, x, s, true);
   this->finishAdjoint(x, time, false);
 }
 
 template <int ND> void IsoΔ3D<ND>::iforward(InCMap x, OutMap y, float const s) const
 {
   auto const time = this->startForward(x, y, false);
-  doIt(x, y, s);
+  doIt(x, y, s, false);
   this->finishForward(y, time, false);
 }
 
 template <int ND> void IsoΔ3D<ND>::iadjoint(OutCMap y, InMap x, float const s) const
 {
   auto const time = this->startAdjoint(y, x, false);
-  doIt(y, x, s);
+  doIt(y, x, s, true);
   this->finishAdjoint(x, time, false);
 }
 
