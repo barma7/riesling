@@ -197,7 +197,6 @@ auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
   GPURegularizers_t r;
   using gpu::ProxKind;
   using gpu::Transform;
-  if (opts.wavelets) { throw Log::Failure("Regs", "Wavelets are not implemented in the GPU PDHG"); }
   if (opts.tgv) {
     r.tgv = true;
     unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bg") : 0u;
@@ -235,6 +234,19 @@ auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
                        .normX = std::sqrt(1.01f)});
   }
   if (opts.tvt) { r.terms.push_back({.T = Transform::GradT, .P = ProxKind::L1, .lambda = opts.tvt.Get(), .norm2 = 1.f}); }
+  if (opts.wavelets) {
+    unsigned mask = 0;
+    for (auto const d : opts.waveDims.Get()) {
+      if (d < 0 || d > 4) { throw Log::Failure("Regs", "Invalid wavelet dimension {}", d); }
+      mask |= 1u << d;
+    }
+    r.terms.push_back({.T = Transform::Identity,
+                       .P = ProxKind::Wavelets,
+                       .lambda = opts.wavelets.Get(),
+                       .norm2 = 1.f,
+                       .waveWidth = int(opts.waveWidth.Get()),
+                       .waveDims = mask});
+  }
   if (opts.llr) {
     // The λ scaling of the CPU prox (Proxs::LLR)
     Proxs::LLR<5> const cpu(opts.llr.Get(), opts.llrPatch.Get(), opts.llrWin.Get(), opts.llrShift, shape);

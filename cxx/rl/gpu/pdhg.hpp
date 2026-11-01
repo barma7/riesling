@@ -33,7 +33,8 @@ enum class ProxKind : int
   L1,  // λ|·|₁ (Proxs::L1)
   L1I, // λ|Im ·|₁ (Proxs::L1I)
   L2,  // λ Σ_blocks |·|₂ over the dimensions in normMask (Proxs::L2)
-  LLR  // λ Σ_patches |·|_* over (nB, nT) (Proxs::LLR, λ already scaled as there)
+  LLR, // λ Σ_patches |·|_* over (nB, nT) (Proxs::LLR, λ already scaled as there)
+  Wavelets // λ |W ·|₁, W the periodic Daubechies wavelet transform over waveDims (Proxs::L1Wavelets, TOps::Wavelets)
 };
 
 struct Term
@@ -47,6 +48,8 @@ struct Term
   float     norm2 = 1.f;      // Upper bound of λmax(T'T), for the step sizes
   float     normX = 1.f;      // Upper bounds of the norms of T's blocks on x and on v (TGV), for the per-term steps
   float     normV = 0.f;
+  int       waveWidth = 6;    // Wavelets: 4, 6 or 8 coefficients
+  unsigned  waveDims = 7u;    // Wavelets: bit d = transform along dimension d of (i, j, k, b, t)
 };
 
 struct PDHGSetup
@@ -103,6 +106,11 @@ void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float si
               double *res = nullptr);
 void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf *z, float sigma, int const shift[3],
              Cxf const *x = nullptr, double *res = nullptr);
+// Wavelets: y = Wᴴ clip_λ(W (y + σ xh)) in place; with res, yold must hold a copy of y from before (the residual)
+void WaveletDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float sigma, Cxf const *x = nullptr,
+                 Cxf const *yold = nullptr, double *res = nullptr);
+// The transform itself (tests): forward or adjoint (inverse) in place
+void WaveletTransform(Term const &t, PDHGSetup const &s, Cxf *y, bool adjoint);
 void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float ax, float av);
 
 } // namespace rl::gpu

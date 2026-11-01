@@ -452,6 +452,132 @@ __global__ void LLRK(Vol const g, LLRGeo const L, float2 const *__restrict__ xh,
   }
 }
 
+/*
+ * Wavelets as TOps::Wavelets: per transformed dimension, every line of L samples is transformed at sizes L, L/2, ... down
+ * to the smallest size the CPU uses (halving while the half is even and > 4), each level on the first sz samples
+ * (periodic Daubechies filters Cc / Cr, offset -N/2); the adjoint runs the levels the other way. One block per line, the
+ * line in shared memory. The adjoint is the gather form of the CPU's scatter: sample p receives, for each tap k, the
+ * pair ii with 2 ii - N/2 + k = p (mod sz).
+ */
+struct WaveCoef
+{
+  float c[8], r[8];
+  int   n;
+};
+
+auto MakeWaveCoef(int const N) -> WaveCoef
+{
+  WaveCoef w{};
+  w.n = N;
+  float const c4[4] = {0.6830127f, 1.1830127f, 0.3169873f, -0.1830127f};
+  float const c6[6] = {0.47046721f, 1.14111692f, 0.650365f, -0.19093442f, -0.12083221f, 0.0498175f};
+  float const c8[8] = {0.32580343f, 1.01094572f, 0.89220014f, -0.03957503f, -0.26450717f, 0.0436163f, 0.0465036f, -0.01498699f};
+  float const *src = N == 4 ? c4 : (N == 6 ? c6 : (N == 8 ? c8 : nullptr));
+  if (!src) { throw std::runtime_error("GPU wavelets: width must be 4, 6 or 8"); }
+  for (int i = 0; i < N; i++) {
+    w.c[i] = src[i] / static_cast<float>(M_SQRT2);
+  }
+  float sign = 1.f;
+  for (int i = 0; i < N; i++) {
+    w.r[i] = sign * w.c[N - 1 - i];
+    sign = -sign;
+  }
+  return w;
+}
+
+__device__ inline auto WrapI(int const i, int const n) -> int
+{
+  int const t = i + n;
+  return t - n * (t / n);
+}
+
+__global__ void WaveK(float2 *__restrict__ x, long long const nLines, int const L, long long const stride,
+                      long long const inner, long long const outerStride, int const minSz, bool const adjoint,
+                      WaveCoef const w)
+{
+  extern __shared__ float2 wsh[];
+  float2         *a = wsh, *b = wsh + L;
+  long long const line = blockIdx.x;
+  if (line >= nLines) { return; }
+  // Line start: the dimensions before the transformed one (inner) and after it (outer)
+  long long const base = (line % inner) + (line / inner) * outerStride;
+  for (int p = threadIdx.x; p < L; p += blockDim.x) {
+    a[p] = x[base + p * stride];
+  }
+  __syncthreads();
+  int const off = -w.n / 2;
+  auto      level = [&](int const sz) {
+    if (sz < 4 || sz % 2) { return; } // As TOps::Wavelets::wav1
+    int const h = sz / 2;
+    if (!adjoint) {
+      for (int ii = threadIdx.x; ii < h; ii += blockDim.x) {
+        float2 lo = make_float2(0.f, 0.f), hi = make_float2(0.f, 0.f);
+        for (int k = 0; k < w.n; k++) {
+          float2 const v = a[WrapI(2 * ii + off + k, sz)];
+          lo = make_float2(fmaf(w.c[k], v.x, lo.x), fmaf(w.c[k], v.y, lo.y));
+          hi = make_float2(fmaf(w.r[k], v.x, hi.x), fmaf(w.r[k], v.y, hi.y));
+        }
+        b[ii] = lo;
+        b[ii + h] = hi;
+      }
+    } else {
+      for (int p = threadIdx.x; p < sz; p += blockDim.x) {
+        float2 acc = make_float2(0.f, 0.f);
+        for (int k = 0; k < w.n; k++) {
+          int const q = WrapI(p - off - k, sz);
+          if (q % 2) { continue; }
+          int const    ii = q / 2;
+          float2 const lo = a[ii], hi = a[ii + h];
+          acc = make_float2(acc.x + w.c[k] * lo.x + w.r[k] * hi.x, acc.y + w.c[k] * lo.y + w.r[k] * hi.y);
+        }
+        b[p] = acc;
+      }
+    }
+    __syncthreads();
+    for (int p = threadIdx.x; p < sz; p += blockDim.x) {
+      a[p] = b[p];
+    }
+    __syncthreads();
+  };
+  if (!adjoint) {
+    for (int sz = L; sz >= minSz; sz /= 2) {
+      level(sz);
+    }
+  } else {
+    for (int sz = minSz; sz <= L; sz *= 2) {
+      level(sz);
+    }
+  }
+  for (int p = threadIdx.x; p < L; p += blockDim.x) {
+    x[base + p * stride] = a[p];
+  }
+}
+
+// y = y + s x (elementwise)
+__global__ void AxpyK(float2 *__restrict__ y, float2 const *__restrict__ x, float const s, long long const n)
+{
+  long long const e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (e >= n) { return; }
+  y[e] = make_float2(fmaf(s, x[e].x, y[e].x), fmaf(s, x[e].y, y[e].y));
+}
+
+// L1 conjugate prox: y = λ y / max(|y|, λ)
+__global__ void ClipK(float2 *__restrict__ y, float const lambda, long long const n)
+{
+  long long const e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (e >= n) { return; }
+  y[e] = Scale(y[e], lambda / fmaxf(hypotf(y[e].x, y[e].y), lambda));
+}
+
+// Dual residual of an identity-transform term: Σ |(yold - y) / σ + (xh - x)|²
+__global__ void IdResK(float2 const *__restrict__ yold, float2 const *__restrict__ y, float2 const *__restrict__ xh,
+                       float2 const *__restrict__ x, float const sigma, long long const n, double *__restrict__ res)
+{
+  long long const e = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (e >= n) { return; }
+  AtomicSum(res, Res2(yold[e], y[e], sigma, Sub(xh[e], x[e])));
+}
+
 auto MakeLLR(Term const &t, Vol const &g, int const shift[3]) -> LLRGeo
 {
   LLRGeo L;
@@ -831,7 +957,11 @@ auto PDHGDeviceBytes(PDHGSetup const &s, int64_t const nC, int64_t const nK) -> 
     n += TermRows(t.T, nI);
     llr = llr || t.P == ProxKind::LLR;
   }
-  if (llr) { n += nI; } // Second buffer for LLR's dual
+  bool wave = false;
+  for (auto const &t : s.terms) {
+    wave = wave || t.P == ProxKind::Wavelets;
+  }
+  if (llr || (wave && s.checkEvery > 0)) { n += nI; } // Second dual buffer (LLR; wavelets with residuals)
   return size_t(n) * sizeof(float2) + 3 * RBlocks * sizeof(double);
 }
 
@@ -892,6 +1022,48 @@ void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf
   Check(cudaGetLastError(), "LLR");
 }
 
+void WaveletTransform(Term const &t, PDHGSetup const &s, Cxf *y, bool const adjoint)
+{
+  long long const sh[5] = {s.nx, s.ny, s.nz, s.nB, s.nT};
+  WaveCoef const  w = MakeWaveCoef(t.waveWidth);
+  long long const n = sh[0] * sh[1] * sh[2] * sh[3] * sh[4];
+  for (int d = 0; d < 5; d++) {
+    if (!((t.waveDims >> d) & 1u)) { continue; }
+    int const L = int(sh[d]);
+    if (L % 2) { throw std::runtime_error("GPU wavelets: transformed dimensions must be even (as TOps::Wavelets)"); }
+    int minSz = L;
+    while ((minSz / 2) % 2 == 0 && minSz > 4) {
+      minSz /= 2;
+    }
+    long long inner = 1;
+    for (int e = 0; e < d; e++) {
+      inner *= sh[e];
+    }
+    long long const nLines = n / L;
+    int const       threads = std::min(256, ((L + 31) / 32) * 32);
+    WaveK<<<unsigned(nLines), threads, 2 * L * sizeof(float2)>>>(reinterpret_cast<float2 *>(y), nLines, L, inner, inner,
+                                                                 inner * L, minSz, adjoint, w);
+    Check(cudaGetLastError(), "wavelets");
+  }
+}
+
+void WaveletDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float const sigma, Cxf const *x,
+                 Cxf const *yold, double *res)
+{
+  if (t.T != Transform::Identity) { throw std::runtime_error("GPU PDHG: wavelets act on the image (identity transform)"); }
+  long long const n = s.nx * s.ny * s.nz * s.nB * s.nT;
+  auto const      Y = reinterpret_cast<float2 *>(y);
+  AxpyK<<<Blocks(n), Threads>>>(Y, reinterpret_cast<float2 const *>(xh), sigma, n);
+  WaveletTransform(t, s, y, false);
+  ClipK<<<Blocks(n), Threads>>>(Y, t.lambda, n);
+  WaveletTransform(t, s, y, true);
+  if (res) {
+    IdResK<<<Blocks(n), Threads>>>(reinterpret_cast<float2 const *>(yold), Y, reinterpret_cast<float2 const *>(xh),
+                                   reinterpret_cast<float2 const *>(x), sigma, n, res);
+  }
+  Check(cudaGetLastError(), "wavelet dual");
+}
+
 void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float const a, float const av)
 {
   Vol const  g = MakeVol(s);
@@ -923,13 +1095,17 @@ void RunPDHG(SNUFFT const                                    &A,
   long long const nX = g.N * g.nB;              // One time point of x
   long long const nCK = A.nC() * A.nK();        // One time point of k-space, device order
   if ((long long)b.size() != s.nT) { throw std::runtime_error("GPU PDHG: one data set per time point"); }
-  bool llr = false;
+  bool llr = false, wave = false;
   for (auto const &t : s.terms) {
     if (!s.tgv && (t.T == Transform::TGV1 || t.T == Transform::TGV2)) {
       throw std::runtime_error("GPU PDHG: TGV terms need the [x; v] unknowns");
     }
     if (t.P == ProxKind::LLR && t.T != Transform::Identity) { throw std::runtime_error("GPU PDHG: LLR on the image only"); }
     llr = llr || t.P == ProxKind::LLR;
+    wave = wave || t.P == ProxKind::Wavelets;
+    if (t.P == ProxKind::Wavelets && t.T != Transform::Identity) {
+      throw std::runtime_error("GPU PDHG: wavelets on the image only");
+    }
   }
 
   // Step sizes σ = τ = 1/√L, L >= λmax(Kᴴ diag(W, I, ...) K) for K = [A; T_1; ...]
@@ -957,7 +1133,8 @@ void RunPDHG(SNUFFT const                                    &A,
   }
   DeviceBuffer bX(nP * sizeof(float2)), bXh(nP * sizeof(float2));
   DeviceBuffer bYd(s.nT * nCK * sizeof(float2)), bB(s.nT * nCK * sizeof(float2));
-  DeviceBuffer bZ(llr ? g.nI * sizeof(float2) : 0);
+  // Second dual buffer: LLR writes its result there (the patches overlap); wavelets keep the old dual there for the residual
+  DeviceBuffer bZ((llr || (wave && s.checkEvery > 0)) ? g.nI * sizeof(float2) : 0);
   std::vector<DeviceBuffer> bY;
   for (auto const &t : s.terms) {
     bY.emplace_back(TermRows(t.T, g.nI) * sizeof(float2));
@@ -1019,6 +1196,9 @@ void RunPDHG(SNUFFT const                                    &A,
         }
         LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), st.s[ir], shift, X, chk ? res + 1 : nullptr);
         std::swap(bY[ir], bZ);
+      } else if (t.P == ProxKind::Wavelets) {
+        if (chk) { Check(cudaMemcpyAsync(bZ.as<Cxf>(), bY[ir].as<Cxf>(), g.nI * sizeof(float2), cudaMemcpyDeviceToDevice), "copy"); }
+        WaveletDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? bZ.as<Cxf>() : nullptr, chk ? res + 1 : nullptr);
       } else {
         TermDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? res + 1 : nullptr);
       }

@@ -2,6 +2,8 @@
 #include "rl/op/grad.hpp"
 #include "rl/op/laplacian.hpp"
 #include "rl/op/ops.hpp"
+#include "rl/op/wavelets.hpp"
+#include "rl/prox/l1-wavelets.hpp"
 #include "rl/prox/llr.hpp"
 #include "rl/prox/norms.hpp"
 #include "rl/tensors.hpp"
@@ -148,4 +150,42 @@ TEST_CASE("PDHG-GPU-LLR", "[gpu]")
   INFO("scaled λ " << cpu.λ << " |u| " << (y + σ * xh).norm() << " |e| " << e.norm());
   CHECK((e - (y + σ * xh)).norm() > 1.e-2f * e.norm()); // The projection did clip
   CHECK(RelDiff(r, e) == Approx(0).margin(2.e-6));
+}
+
+TEST_CASE("PDHG-GPU-wavelets", "[gpu]")
+{
+  Sz5 const   sh5{nx, ny, nz, nb, nt};
+  Index const n = Product(sh5);
+  Index const width = GENERATE(4, 6, 8);
+  bool const  withB = GENERATE(false, true); // Also transform dimension 3 (b, size 2: no level of 4 or more)
+  std::vector<Index> dims{0, 1, 2};
+  if (withB) { dims.push_back(3); }
+  INFO("width " << width << " dims " << dims.size());
+  unsigned mask = 0;
+  for (auto const d : dims) {
+    mask |= 1u << d;
+  }
+  gpu::Term const t{.T = gpu::Transform::Identity, .P = gpu::ProxKind::Wavelets, .lambda = 0.6f, .waveWidth = int(width),
+                    .waveDims = mask};
+  auto const      s = Setup(false);
+
+  // The transform and its adjoint
+  TOps::Wavelets<5> W(sh5, width, dims);
+  Vector const      v = Vector::Random(n);
+  Dev               dv(v);
+  gpu::WaveletTransform(t, s, dv.p(), false);
+  CHECK(RelDiff(dv.get(n), W.forward(v)) == Approx(0).margin(1.e-6));
+  Dev dw(v);
+  gpu::WaveletTransform(t, s, dw.p(), true);
+  CHECK(RelDiff(dw.get(n), W.adjoint(v)) == Approx(0).margin(1.e-6));
+
+  // Dual step with the conjugate prox
+  float const σ = 0.37f;
+  Vector      xh = Vector::Random(n), y = Vector::Random(n);
+  Vector      e = y + σ * xh;
+  Proxs::L1Wavelets(t.lambda, sh5, width, dims).conj(σ, e);
+  Dev dx(xh), dy(y);
+  gpu::WaveletDual(t, s, dx.p(), dy.p(), σ);
+  CHECK((e - (y + σ * xh)).norm() > 1.e-2f * e.norm()); // The clip did act
+  CHECK(RelDiff(dy.get(n), e) == Approx(0).margin(1.e-6));
 }
