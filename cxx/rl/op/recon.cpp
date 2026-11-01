@@ -118,6 +118,7 @@ template <int ND> Recon<ND>::Recon(ReconOpts const       &rOpts,
           if (rOpts.gpu) { // Same operator on the GPU, and Aᴴ M A in one device pass
             auto NS = TOps::MakeSENSENUFFTGPU(gridOpts, traj, maps, b, TOps::KSpaceWeights(M));
             auto NN = NS->normal();
+            G = NS;
             if (nTime > 1) {
               A = TOps::MakeLoop<4, 4>(TOps::MakeReshapeOutput(NS, AddBack(NS->oshape, 1)), nTime);
               N = TOps::MakeLoop<4, 4>(NN, nTime);

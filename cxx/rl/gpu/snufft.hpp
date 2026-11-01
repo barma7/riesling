@@ -108,6 +108,7 @@ public:
    * channel-major, nC x nK(), the valid samples in the operator's internal order. Asynchronous (default stream).
    */
   auto nK() const -> int64_t;                                 // Samples per channel in device order (= nValid())
+  auto nC() const -> int64_t;                                 // Channels
   void toDeviceOrder(Cxf const *k, Cxf *dk) const;            // Host k (nC, nSamp, nTrace) -> device dk
   void fromDeviceOrder(Cxf const *dk, Cxf *k) const;          // Device dk -> host k (the invalid samples 0)
   void forwardD(Cxf const *x, Cxf *y, float s) const;         // y = s A x

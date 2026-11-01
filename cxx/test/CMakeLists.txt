@@ -26,7 +26,7 @@ if(${BUILD_TESTS})
         op/wavelets.cpp
     )
     if(RL_CUDA)
-        target_sources(riesling-tests PRIVATE op/sense-nufft-gpu.cpp)
+        target_sources(riesling-tests PRIVATE op/sense-nufft-gpu.cpp op/pdhg-gpu.cpp)
     endif()
     target_link_libraries(riesling-tests PUBLIC
         rl

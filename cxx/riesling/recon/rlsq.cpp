@@ -2,6 +2,7 @@
 #include "regularizers.hpp"
 
 #include "rl/algo/admm.hpp"
+#include "rl/algo/pdhg-gpu.hpp"
 #include "rl/io/hd5.hpp"
 #include "rl/log/debug.hpp"
 #include "rl/log/log.hpp"
@@ -26,6 +27,17 @@ auto TimeCoupled(RegOpts &r) -> bool
   }
   return false;
 }
+
+// Sizes and regularizer terms of the GPU PDHG for images of the given shape (nx, ny, nz, nB, nT)
+auto GPUSetup(RegOpts &regOpts, Sz5 const shape) -> gpu::PDHGSetup
+{
+  auto const     g = GPURegularizers(regOpts, shape);
+  gpu::PDHGSetup s;
+  s.nx = shape[0], s.ny = shape[1], s.nz = shape[2], s.nB = shape[3], s.nT = shape[4];
+  s.terms = g.terms;
+  s.tgv = g.tgv;
+  return s;
+}
 } // namespace
 
 template <int ND> void run_recon_rlsq(args::Subparser &parser)
@@ -46,7 +58,7 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
   args::ValueFlag<Index>       restart(parser, "R", "Restart PDHG", {"pdhg-restart", 'r'}, 8);
   args::Flag                   adapt(parser, "A", "Adaptive PDHG", {"adaptive"});
   ArrayFlag<float, ND>         cropFov(parser, "FOV", "Crop FoV in mm (x,y,z)", {"crop-fov"});
-  args::Flag splitT(parser, "S", "ADMM: solve each time point on its own (less memory; regularizers must not couple time)",
+  args::Flag splitT(parser, "S", "Solve each time point on its own (less memory; regularizers must not couple time)",
                     {"split-time"});
 
   ParseCommand(parser, coreArgs.iname, coreArgs.oname);
@@ -65,7 +77,6 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
    * points together, as without splitting. Each time point gets its own ADMM penalty and stopping test.
    */
   if (splitT) {
-    if (pdhg) { throw Log::Failure(cmd, "--split-time is only implemented for ADMM"); }
     if (f0Args.Nτ) { throw Log::Failure(cmd, "--split-time does not support off-resonance correction"); }
     if (TimeCoupled(regOpts)) {
       throw Log::Failure(cmd, "--split-time needs regularizers that do not couple time (no t in --iso, no --tvt or --llr, "
@@ -93,19 +104,39 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
       Log::Print(cmd, "Time point {} of {}", it + 1, nT);
       Cx5 nc = noncart.slice(Sz5{0, 0, 0, 0, it}, tshape);
       if (scale != 1.f) { nc.device(Threads::TensorDevice()) = nc * Cx(scale); }
-      auto [reg, A, ext_x] = Regularizers(regOpts, R.A);
-      ADMM::DebugX debug_x = [shape, it, di = debugIters.Get()](Index const ii, ADMM::Vector const &xx) {
-        if (Log::IsDebugging() && (ii % di == 0)) {
-          Log::Tensor(fmt::format("admm-x-t{}-{:02d}", it, ii), shape, xx.data(), HD5::Dims::Images);
+      Ops::Op::Vector x;
+      if (pdhg && R.G) { // All of the iterations on the GPU
+        if (restart) { throw Log::Failure(cmd, "--pdhg-restart is not implemented on the GPU"); }
+        auto debug = [shape, it](Index const ii, Ops::Op::Vector const &xv) {
+          if (Log::IsDebugging()) { Log::Tensor(fmt::format("pdhg-x-t{}-{:02d}", it, ii), shape, xv.data(), HD5::Dims::Images); }
+        };
+        x = PDHG::RunGPU(nc, *R.G, GPUSetup(regOpts, shape), pdhgArgs.Get(), debug, debugIters.Get());
+      } else {
+        auto [reg, A, ext_x] = Regularizers(regOpts, R.A);
+        if (pdhg) {
+          PDHG::Debug debug = [shape, ext_x, it, di = debugIters.Get()](Index const ii, PDHG::Vector const &dx, PDHG::Vector const &) {
+            if (Log::IsDebugging() && (ii % di == 0)) {
+              auto const xit = ext_x ? ext_x->forward(dx) : dx;
+              Log::Tensor(fmt::format("pdhg-x-t{}-{:02d}", it, ii), shape, xit.data(), HD5::Dims::Images);
+            }
+          };
+          x = restart ? PDHG::Restarted(restart.Get(), CollapseToConstVector(nc), A, R.M, reg, pdhgArgs.Get(), debug)
+                      : PDHG::Run(CollapseToConstVector(nc), A, R.M, reg, pdhgArgs.Get(), debug);
+        } else {
+          ADMM::DebugX debug_x = [shape, it, di = debugIters.Get()](Index const ii, ADMM::Vector const &xx) {
+            if (Log::IsDebugging() && (ii % di == 0)) {
+              Log::Tensor(fmt::format("admm-x-t{}-{:02d}", it, ii), shape, xx.data(), HD5::Dims::Images);
+            }
+          };
+          ADMM opt{A, R.M, reg, admmArgs.Get(), debug_x, nullptr};
+          if (R.N) {
+            opt.AhWA = ext_x ? std::make_shared<Ops::LeadingBlock>(R.N, A->cols()) : Ops::Op::Ptr(R.N);
+            opt.pinHost = TOps::HostPinner();
+          }
+          x = opt.run(CollapseToConstVector(nc));
         }
-      };
-      ADMM opt{A, R.M, reg, admmArgs.Get(), debug_x, nullptr};
-      if (R.N) {
-        opt.AhWA = ext_x ? std::make_shared<Ops::LeadingBlock>(R.N, A->cols()) : Ops::Op::Ptr(R.N);
-        opt.pinHost = TOps::HostPinner();
+        if (ext_x) { x = ext_x->forward(x); }
       }
-      auto x = opt.run(CollapseToConstVector(nc));
-      if (ext_x) { x = ext_x->forward(x); }
       if (scale != 1.f) { x.device(Threads::CoreDevice()) = x / Cx(scale); }
       auto const xm = AsConstTensorMap(x, R.A->ishape);
       out.chip<4>(it) = oc.adjoint(xm).template chip<4>(0);
@@ -136,7 +167,14 @@ template <int ND> void run_recon_rlsq(args::Subparser &parser)
   auto [reg, A, ext_x] = Regularizers(regOpts, R.A);
 
   Ops::Op::Vector x;
-  if (pdhg) {
+  if (pdhg && R.G) { // All of the iterations on the GPU
+    if (restart) { throw Log::Failure(cmd, "--pdhg-restart is not implemented on the GPU"); }
+    auto debug = [shape](Index const ii, Ops::Op::Vector const &xv) {
+      if (Log::IsDebugging()) { Log::Tensor(fmt::format("pdhg-x-{:02d}", ii), shape, xv.data(), HD5::Dims::Images); }
+    };
+    x = PDHG::RunGPU(noncart, *R.G, GPUSetup(regOpts, shape), pdhgArgs.Get(), debug, debugIters.Get());
+    ext_x = nullptr; // x only
+  } else if (pdhg) {
     PDHG::Debug debug = [shape, ext_x, di = debugIters.Get()](Index const ii, PDHG::Vector const &dx, PDHG::Vector const &x̅) {
       if (Log::IsDebugging() && (ii % di == 0)) {
         if (ext_x) {

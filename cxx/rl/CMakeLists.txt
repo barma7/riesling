@@ -30,6 +30,7 @@ algo/lsmr.cpp
 algo/lsqr.cpp
 algo/otsu.cpp
 algo/pdhg.cpp
+algo/pdhg-gpu.cpp
 algo/stats.cpp
 
 basis/basis.cpp
@@ -211,11 +212,11 @@ target_link_libraries(rl PUBLIC
     scn::scn
 )
 if(RL_CUDA)
-    target_sources(rl PRIVATE gpu/snufft.cu)
+    target_sources(rl PRIVATE gpu/snufft.cu gpu/pdhg.cu)
     target_compile_definitions(rl PUBLIC RL_CUDA)
     target_link_libraries(rl PUBLIC CUDA::cudart_static CUDA::cufft)
     set_target_properties(rl PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
-    set_source_files_properties(gpu/snufft.cu PROPERTIES COMPILE_OPTIONS "-O3;-lineinfo")
+    set_source_files_properties(gpu/snufft.cu gpu/pdhg.cu PROPERTIES COMPILE_OPTIONS "-O3;-lineinfo")
 endif()
 set_target_properties(rl PROPERTIES
     CXX_STANDARD 20

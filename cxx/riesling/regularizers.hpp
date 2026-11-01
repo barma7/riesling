@@ -3,6 +3,7 @@
 #include "args.hpp"
 
 #include "rl/algo/regularizer.hpp"
+#include "rl/gpu/pdhg.hpp"
 
 #include <variant>
 
@@ -39,5 +40,14 @@ struct Regularizers_t
 };
 
 auto Regularizers(RegOpts &regOpts, TOps::TOp<5, 5>::Ptr const &A) -> Regularizers_t;
+
+/* The same regularizers for the GPU PDHG (rl/gpu/pdhg.hpp): the same transforms, proxes, λ and norm bounds as
+ * Regularizers(). TGV, TV, TVT, L1, L1I and LLR; throws for the others. tgv: the unknowns are [x; v]. */
+struct GPURegularizers_t
+{
+  std::vector<gpu::Term> terms;
+  bool                   tgv = false;
+};
+auto GPURegularizers(RegOpts &regOpts, Sz5 const shape) -> GPURegularizers_t;
 
 } // namespace rl

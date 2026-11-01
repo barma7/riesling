@@ -179,4 +179,60 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
   return {regs, A, ext};
 }
 
+namespace {
+// Normed dimensions of the 6D shape (i, j, k, b, t, g) from --iso, as the L2 proxes Regularizers() builds
+auto IsoMask(std::string const &iso, std::string const &allowed) -> unsigned
+{
+  unsigned mask = 0;
+  for (auto const c : iso) {
+    if (allowed.find(c) == std::string::npos) { throw Log::Failure("Regs", "Isotropic dims must be {} here", allowed); }
+    mask |= c == 'b' ? 1u << 3 : (c == 't' ? 1u << 4 : 1u << 5);
+  }
+  return mask;
+}
+} // namespace
+
+auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
+{
+  GPURegularizers_t r;
+  using gpu::ProxKind;
+  using gpu::Transform;
+  if (opts.tv2) { throw Log::Failure("Regs", "--tv2 is not implemented in the GPU PDHG"); }
+  if (opts.wavelets) { throw Log::Failure("Regs", "Wavelets are not implemented in the GPU PDHG"); }
+  if (opts.tgv) {
+    r.tgv = true;
+    unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bg") : 0u;
+    if (opts.iso && opts.iso.Get() != "b" && opts.iso.Get() != "g" && opts.iso.Get() != "bg") {
+      throw Log::Failure("Regs", "Isotropic dims must be b, g, or bg");
+    }
+    ProxKind const P = opts.iso ? ProxKind::L2 : ProxKind::L1;
+    r.terms.push_back({.T = Transform::TGV1, .P = P, .lambda = opts.tgv.Get(), .normMask = mask, .norm2 = 2.f});
+    r.terms.push_back({.T = Transform::TGV2, .P = P, .lambda = opts.tgv.Get(), .normMask = mask, .norm2 = 0.25f});
+  }
+  if (opts.tv) {
+    unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bgt") : 0u;
+    r.terms.push_back({.T = Transform::Grad, .P = opts.iso ? ProxKind::L2 : ProxKind::L1, .lambda = opts.tv.Get(),
+                       .normMask = mask, .norm2 = 1.f});
+  }
+  if (opts.tvt) { r.terms.push_back({.T = Transform::GradT, .P = ProxKind::L1, .lambda = opts.tvt.Get(), .norm2 = 1.f}); }
+  if (opts.llr) {
+    // The λ scaling of the CPU prox (Proxs::LLR)
+    Proxs::LLR<5> const cpu(opts.llr.Get(), opts.llrPatch.Get(), opts.llrWin.Get(), opts.llrShift, shape);
+    r.terms.push_back({.T = Transform::Identity,
+                       .P = ProxKind::LLR,
+                       .lambda = cpu.λ,
+                       .llrPatch = int(opts.llrPatch.Get()),
+                       .llrWindow = int(opts.llrWin.Get()),
+                       .llrShift = opts.llrShift,
+                       .norm2 = 1.f});
+  }
+  if (opts.l1) {
+    if (opts.iso) { throw Log::Failure("Regs", "--l1 with --iso is not implemented in the GPU PDHG"); }
+    r.terms.push_back({.T = Transform::Identity, .P = ProxKind::L1, .lambda = opts.l1.Get(), .norm2 = 1.f});
+  }
+  if (opts.l1i) { r.terms.push_back({.T = Transform::Identity, .P = ProxKind::L1I, .lambda = opts.l1i.Get(), .norm2 = 1.f}); }
+  if (r.terms.empty()) { throw Log::Failure("Reg", "Must specify at least one regularizer"); }
+  return r;
+}
+
 } // namespace rl

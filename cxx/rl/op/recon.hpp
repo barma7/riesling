@@ -10,6 +10,10 @@
  *  Full recon operators
  */
 
+namespace rl::TOps {
+struct SENSENUFFTGPU;
+}
+
 namespace rl {
 template <int ND> struct Recon
 {
@@ -31,5 +35,6 @@ template <int ND> struct Recon
         Re3 const             &f0map);
   TOps::TOp<5, 5>::Ptr A, M;
   TOps::TOp<5, 5>::Ptr N; // Aᴴ M A as one operator (--gpu), else nullptr
+  std::shared_ptr<TOps::SENSENUFFTGPU> G; // The GPU operator of one time point (--gpu), for GPU solvers
 };
 } // namespace rl

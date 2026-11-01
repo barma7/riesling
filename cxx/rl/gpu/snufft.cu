@@ -955,6 +955,7 @@ void SNUFFT::normal(Cxf const *x, Cxf *y, float const s) const
 }
 
 auto SNUFFT::nK() const -> int64_t { return impl_->nValid; }
+auto SNUFFT::nC() const -> int64_t { return impl_->set.nC; }
 
 void SNUFFT::sync() const { Check(cudaDeviceSynchronize(), "sync"); }
 
