@@ -37,7 +37,9 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
 {
   Ops::Op::Ptr             A = recon;
   auto const               shape = recon->ishape;
+  Index const              nx = Product(shape);
   std::vector<Regularizer> regs;
+  Ops::Op::Ptr             ext; // With TGV the unknowns are [x; v]: reads x out of them
 
   if (opts.tgv) {
     auto grad_x = TOps::Grad<5, 3>::Make(shape, Sz3{0, 1, 2});
@@ -70,8 +72,11 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
     regs.push_back({op1, prox_x, grad_x->oshape, 2.f});
     regs.push_back({op2, prox_v, grad_v->oshape, 0.25f});
     A = std::make_shared<Ops::Multiply>(A, ext_x);
-    return {regs, A, ext_x};
+    ext = ext_x;
   }
+
+  // The other terms act on x; with TGV their transforms read x out of [x; v] (TGV can be combined with them)
+  auto const onX = [&ext](Ops::Op::Ptr const &T) -> Ops::Op::Ptr { return ext ? (T ? Ops::Mul(T, ext) : ext) : T; };
 
   if (opts.tv) {
     auto             grad = TOps::Grad<5, 3>::Make(shape, Sz3{0, 1, 2});
@@ -97,7 +102,7 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
     } else {
       prox = Proxs::L1::Make(opts.tv.Get(), grad->rows());
     }
-    regs.push_back({grad, prox, grad->oshape});
+    regs.push_back({onX(grad), prox, grad->oshape});
   }
 
   if (opts.tv2) {
@@ -125,24 +130,24 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
       pl = Proxs::L1::Make(opts.tv2.Get() * (1 - σ), lap->rows());
     }
     auto prox = Proxs::Stack::Make({pg, pl});
-    regs.push_back({both, prox, grad->oshape, 2.01f}); // λmax(∇'∇ + Δ'Δ) <= 1 + 1.01 (test/op/grad-adjoint.cpp)
+    regs.push_back({onX(both), prox, grad->oshape, 2.01f}); // λmax(∇'∇ + Δ'Δ) <= 1 + 1.01 (test/op/grad-adjoint.cpp)
   }
 
   if (opts.tvt) {
     auto grad = TOps::Grad<5, 1>::Make(shape, Sz1{4});
     auto prox = Proxs::L1::Make(opts.tvt.Get(), grad->rows());
-    regs.push_back({grad, prox, grad->oshape});
+    regs.push_back({onX(grad), prox, grad->oshape});
   }
 
   if (opts.wavelets) {
-    regs.push_back({nullptr,
+    regs.push_back({onX(nullptr),
                     std::make_shared<Proxs::L1Wavelets>(opts.wavelets.Get(), shape, opts.waveWidth.Get(), opts.waveDims.Get()),
                     shape});
   }
 
   if (opts.llr) {
     regs.push_back(
-      {nullptr, std::make_shared<Proxs::LLR<5>>(opts.llr.Get(), opts.llrPatch.Get(), opts.llrWin.Get(), opts.llrShift, shape),
+      {onX(nullptr), std::make_shared<Proxs::LLR<5>>(opts.llr.Get(), opts.llrPatch.Get(), opts.llrWin.Get(), opts.llrShift, shape),
        shape});
   }
 
@@ -159,19 +164,19 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
         throw Log::Failure("Regs", "Valid dims are bt");
       }
     } else {
-      prox = Proxs::L1::Make(opts.l1.Get(), A->cols());
+      prox = Proxs::L1::Make(opts.l1.Get(), nx);
     }
-    regs.push_back({nullptr, prox, shape});
+    regs.push_back({onX(nullptr), prox, shape});
   }
 
   if (opts.l1i) {
-    Proxs::Prox::Ptr prox = Proxs::L1I::Make(opts.l1i.Get(), A->cols());
-    regs.push_back({nullptr, prox, shape});
+    Proxs::Prox::Ptr prox = Proxs::L1I::Make(opts.l1i.Get(), nx);
+    regs.push_back({onX(nullptr), prox, shape});
   }
 
   if (regs.size() == 0) { throw Log::Failure("Reg", "Must specify at least one regularizer"); }
 
-  return {regs, A, nullptr};
+  return {regs, A, ext};
 }
 
 } // namespace rl
