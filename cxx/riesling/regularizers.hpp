@@ -42,7 +42,9 @@ struct Regularizers_t
 auto Regularizers(RegOpts &regOpts, TOps::TOp<5, 5>::Ptr const &A) -> Regularizers_t;
 
 /* The same regularizers for the GPU PDHG (rl/gpu/pdhg.hpp): the same transforms, proxes, λ and norm bounds as
- * Regularizers(). TGV, TV, TVT, L1, L1I and LLR; throws for the others. tgv: the unknowns are [x; v]. */
+ * Regularizers(), for all of its options (TGV, TV, TV + Laplacian, TVT, wavelets, LLR, L1, L1I; also combined). --tv2 is
+ * built as two terms (gradient and Laplacian), the same problem as the CPU's stacked term. tgv: the unknowns are [x; v].
+ */
 struct GPURegularizers_t
 {
   std::vector<gpu::Term> terms;
