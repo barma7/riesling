@@ -51,6 +51,7 @@ struct Coef
   float g;      // Grad<5, 3>: (1 / sqrt(3)) / 2
   float t;      // Grad<5, 1>: 1 / 2
   float vd, vo; // GradVec<6, 3>: diagonal (1 / sqrt(12)) / 2, off-diagonal (1 / sqrt(12)) / sqrt(2) / 2
+  float lap;    // IsoΔ3D: 1 / (48 sqrt(28.3)), times -200 (centre), 20 (faces), 6 (edges), 1 (corners)
 };
 
 auto MakeCoef() -> Coef
@@ -58,7 +59,8 @@ auto MakeCoef() -> Coef
   float const gs = 1.f / std::sqrt(3);
   float const vs = 1.f / std::sqrt(2 * 3 * (3 + 1) / 2);
   float const vs2 = vs / std::sqrt(2);
-  return Coef{gs / 2.f, 1.f / 2.f, vs / 2.f, vs2 / 2.f};
+  float const ls = 1.f / (48.f * std::sqrt(28.3));
+  return Coef{gs / 2.f, 1.f / 2.f, vs / 2.f, vs2 / 2.f, ls};
 }
 
 __device__ inline auto Add(float2 const a, float2 const b) -> float2 { return make_float2(a.x + b.x, a.y + b.y); }
@@ -91,8 +93,16 @@ auto Components(Transform const T) -> int
   case Transform::GradT: return 1;
   case Transform::TGV1: return 3;
   case Transform::TGV2: return 6;
+  case Transform::Lap: return 1;
   }
   return 1;
+}
+
+// Weight of a neighbour of the isotropic Laplacian (IsoΔ3D): -200 at the centre, 20 faces, 6 edges, 1 corners
+__device__ inline auto LapW(int const di, int const dj, int const dk) -> float
+{
+  int const n = (di != 0) + (dj != 0) + (dk != 0);
+  return n == 0 ? -200.f : (n == 1 ? 20.f : (n == 2 ? 6.f : 1.f));
 }
 
 /*
@@ -117,6 +127,19 @@ __device__ inline auto Elem(Vol const &g, Coef const &c, float2 const *__restric
     float2 const x0 = xh[g.off(i, j, k, bt, 0)];
     float2 const xn = xh[g.off(i, j, k, b + g.nB * Nxt(t, g.nT), 0)];
     return Scale(Sub(xn, x0), c.t);
+  } else if constexpr (T == Transform::Lap) { // Interior points only, as IsoΔ3D
+    if (i < 1 || i > g.nx - 2 || j < 1 || j > g.ny - 2 || k < 1 || k > g.nz - 2) { return make_float2(0.f, 0.f); }
+    float2 acc = make_float2(0.f, 0.f);
+    for (int dk = -1; dk <= 1; dk++) {
+      for (int dj = -1; dj <= 1; dj++) {
+        for (int di = -1; di <= 1; di++) {
+          float2 const u = xh[g.off(i + di, j + dj, k + dk, bt, 0)];
+          float const  w = LapW(di, dj, dk);
+          acc = make_float2(fmaf(w, u.x, acc.x), fmaf(w, u.y, acc.y));
+        }
+      }
+    }
+    return Scale(acc, c.lap);
   } else { // TGV2: v at xh + nI, components 0, 1, 2
     float2 const *v = xh + g.nI;
     auto const    B = [&](int const vc, int const d) {
@@ -245,6 +268,22 @@ __global__ void AdjK(Vol const g, Coef const c, float2 const *__restrict__ y, fl
         xv = make_float2(fmaf(-av, yy.x, xv.x), fmaf(-av, yy.y, xv.y));
       }
     }
+  } else if constexpr (T == Transform::Lap) {
+    // Transpose of the interior-only stencil: the contributions of the interior neighbours (also next to the boundary)
+    float2 acc = make_float2(0.f, 0.f);
+    for (int dk = -1; dk <= 1; dk++) {
+      for (int dj = -1; dj <= 1; dj++) {
+        for (int di = -1; di <= 1; di++) {
+          int const ni = i - di, nj = j - dj, nk = k - dk;
+          if (ni < 1 || ni > g.nx - 2 || nj < 1 || nj > g.ny - 2 || nk < 1 || nk > g.nz - 2) { continue; }
+          float2 const u = y[g.off(ni, nj, nk, bt, 0)];
+          float const  w = LapW(di, dj, dk);
+          acc = make_float2(fmaf(w, u.x, acc.x), fmaf(w, u.y, acc.y));
+        }
+      }
+    }
+    float const al = a * c.lap;
+    X[e] = make_float2(fmaf(al, acc.x, X[e].x), fmaf(al, acc.y, X[e].y));
   } else if constexpr (T == Transform::GradT) {
     float2 const s = Sub(y[g.off(i, j, k, b + g.nB * Prv(t, g.nT), 0)], y[g.off(i, j, k, bt, 0)]);
     float const  at = a * c.t;
@@ -829,6 +868,7 @@ void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float co
   case Transform::GradT: RL_DUAL_P(Transform::GradT); break;
   case Transform::TGV1: RL_DUAL_P(Transform::TGV1); break;
   case Transform::TGV2: RL_DUAL_P(Transform::TGV2); break;
+  case Transform::Lap: RL_DUAL_P(Transform::Lap); break;
   }
 #undef RL_DUAL_P
 #undef RL_DUAL
@@ -864,6 +904,7 @@ void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float 
   case Transform::GradT: AdjK<Transform::GradT><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
   case Transform::TGV1: AdjK<Transform::TGV1><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
   case Transform::TGV2: AdjK<Transform::TGV2><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
+  case Transform::Lap: AdjK<Transform::Lap><<<Blocks(g.nI), Threads>>>(g, c, Y, XX, a, av); break;
   }
   Check(cudaGetLastError(), "term adjoint");
 }

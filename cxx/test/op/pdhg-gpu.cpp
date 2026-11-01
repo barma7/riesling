@@ -1,5 +1,6 @@
 #include "rl/gpu/pdhg.hpp"
 #include "rl/op/grad.hpp"
+#include "rl/op/laplacian.hpp"
 #include "rl/op/ops.hpp"
 #include "rl/prox/llr.hpp"
 #include "rl/prox/norms.hpp"
@@ -59,15 +60,17 @@ TEST_CASE("PDHG-GPU-terms", "[gpu]")
   auto        ext_v = std::make_shared<Ops::Extract>(4 * n, n, 3 * n);
   auto        tgv1 = Ops::Sub(Ops::Mul(grad, ext_x), ext_v);
   auto        tgv2 = Ops::Mul(gv, ext_v);
+  auto        lap = TOps::IsoΔ3D<5>::Make(sh5);
 
   auto const  T = GENERATE(gpu::Transform::Identity, gpu::Transform::Grad, gpu::Transform::GradT, gpu::Transform::TGV1,
-                          gpu::Transform::TGV2);
+                          gpu::Transform::TGV2, gpu::Transform::Lap);
   bool const  tgv = T == gpu::Transform::TGV1 || T == gpu::Transform::TGV2;
   Index const nX = tgv ? 4 * n : n;
   Ops::Op::Ptr F = T == gpu::Transform::Grad    ? Ops::Op::Ptr(grad)
                    : T == gpu::Transform::GradT ? Ops::Op::Ptr(gradt)
                    : T == gpu::Transform::TGV1  ? tgv1
                    : T == gpu::Transform::TGV2  ? tgv2
+                   : T == gpu::Transform::Lap   ? Ops::Op::Ptr(lap)
                                                 : Ops::Op::Ptr(nullptr);
   Index const  nY = F ? F->rows() : n;
   Index const  G = nY / n;

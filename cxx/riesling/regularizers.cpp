@@ -197,7 +197,6 @@ auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
   GPURegularizers_t r;
   using gpu::ProxKind;
   using gpu::Transform;
-  if (opts.tv2) { throw Log::Failure("Regs", "--tv2 is not implemented in the GPU PDHG"); }
   if (opts.wavelets) { throw Log::Failure("Regs", "Wavelets are not implemented in the GPU PDHG"); }
   if (opts.tgv) {
     r.tgv = true;
@@ -216,6 +215,24 @@ auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
     unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bgt") : 0u;
     r.terms.push_back({.T = Transform::Grad, .P = opts.iso ? ProxKind::L2 : ProxKind::L1, .lambda = opts.tv.Get(),
                        .normMask = mask, .norm2 = 1.f});
+  }
+  if (opts.tv2) {
+    // As Regularizers(): λσ on the gradient and λ(1 - σ) on the isotropic Laplacian (σ = 0.77, Bock et al. 2008), as two
+    // terms (the CPU stacks them: the same problem and, with scalar steps, the same iteration)
+    if (opts.iso && opts.iso.Get() != "b" && opts.iso.Get() != "t" && opts.iso.Get() != "bt") {
+      throw Log::Failure("Regs", "Isotropic dims must bebt");
+    }
+    float const    σ = 0.77;
+    unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bt") : 0u;
+    ProxKind const P = opts.iso ? ProxKind::L2 : ProxKind::L1;
+    r.terms.push_back({.T = Transform::Grad, .P = P, .lambda = opts.tv2.Get() * σ, .normMask = mask, .norm2 = 1.f});
+    // λmax(Δ'Δ) <= 1.01 (test/op/grad-adjoint.cpp)
+    r.terms.push_back({.T = Transform::Lap,
+                       .P = P,
+                       .lambda = opts.tv2.Get() * (1 - σ),
+                       .normMask = mask,
+                       .norm2 = 1.01f,
+                       .normX = std::sqrt(1.01f)});
   }
   if (opts.tvt) { r.terms.push_back({.T = Transform::GradT, .P = ProxKind::L1, .lambda = opts.tvt.Get(), .norm2 = 1.f}); }
   if (opts.llr) {

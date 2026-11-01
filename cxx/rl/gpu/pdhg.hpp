@@ -24,7 +24,8 @@ enum class Transform : int
   Grad,     // ∇x over the three spatial dimensions (TOps::Grad<5, 3>, G = 3)
   GradT,    // Difference along the time dimension (TOps::Grad<5, 1> on dimension 4, G = 1)
   TGV1,     // ∇x - v (G = 3)
-  TGV2      // Symmetrized gradient of v (TOps::GradVec<6, 3>, G = 6)
+  TGV2,     // Symmetrized gradient of v (TOps::GradVec<6, 3>, G = 6)
+  Lap       // Isotropic 27-point Laplacian at the interior points (TOps::IsoΔ3D<5>, G = 1; --tv2)
 };
 
 enum class ProxKind : int
