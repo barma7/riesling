@@ -80,7 +80,9 @@ PDHGArgs::PDHGArgs(args::Subparser &parser)
   , weighted(parser, "W", "PDHG: weight the data term by the k-space weights (ADMM's objective), not only the dual steps",
              {"pdhg-weighted"})
   , its(parser, "N", "Max iterations (4)", {"max-its", 'i'}, 128)
-  , tol(parser, "B", "PDHG residual/Δ tolerance (1e-2)", {"pdhg-tol", 't'}, 1.e-4f)
+  , check(parser, "N", "PDHG: residuals every N iterations, stop when both < --pdhg-tol (0: off; GPU only)", {"pdhg-check"}, 0)
+  , tol(parser, "B", "PDHG: stop when |Δx|/|x| < tol, with --pdhg-check when both relative residuals are (1e-4; 0: never)",
+        {"pdhg-tol", 't'}, 1.e-4f)
   , λE(parser, "λE", "Max eigenvalue of the preconditioned encoding operator (default: estimated)", {"lambda-E", 'e'}, 0.f)
   , ratio(parser, "R", "PDHG: primal over dual step size, τ/σ (default 1; στ = 1/L either way)", {"pdhg-ratio"}, 1.f)
   , autoRatio(parser, "A", "PDHG: choose τ/σ automatically (from the data, then from the iterates); overrides --pdhg-ratio",
@@ -96,7 +98,7 @@ auto PDHGArgs::Get() -> rl::PDHG::Opts
   if (!(ratio.Get() > 0.f)) { throw rl::Log::Failure("PDHG", "--pdhg-ratio must be positive"); }
   return rl::PDHG::Opts{
     .adaptive = adaptive, .lad = lad, .weighted = weighted, .imax = its.Get(), .tol = tol.Get(), .λE = λE.Get(),
-    .ratio = ratio.Get(), .termSteps = termSteps, .autoRatio = autoRatio};
+    .ratio = ratio.Get(), .checkEvery = check.Get(), .termSteps = termSteps, .autoRatio = autoRatio};
 }
 
 ADMMArgs::ADMMArgs(args::Subparser &parser)

@@ -178,6 +178,7 @@ auto Run(CMap b, Op::Ptr E, Op::Ptr P, std::vector<Regularizer> const &regs, Opt
 
   if (opts.autoRatio && opts.adaptive) { throw Log::Failure("PDHG", "--pdhg-auto-ratio and --adaptive exclude each other"); }
   if (opts.termSteps) { throw Log::Failure("PDHG", "--pdhg-term-steps is only implemented for the GPU PDHG (--gpu)"); }
+  if (opts.checkEvery > 0) { throw Log::Failure("PDHG", "--pdhg-check is only implemented for the GPU PDHG (--gpu)"); }
   float ratio = opts.ratio;
   Index nextRatio = 50;
   if (opts.autoRatio) {

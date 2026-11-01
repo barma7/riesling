@@ -1,5 +1,7 @@
 #include "pdhg.hpp"
 
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -7,6 +9,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace rl::gpu {
@@ -62,6 +65,22 @@ __device__ inline auto Add(float2 const a, float2 const b) -> float2 { return ma
 __device__ inline auto Sub(float2 const a, float2 const b) -> float2 { return make_float2(a.x - b.x, a.y - b.y); }
 __device__ inline auto Scale(float2 const a, float const s) -> float2 { return make_float2(a.x * s, a.y * s); }
 __device__ inline auto Nxt(int const i, int const n) -> int { return i + 1 == n ? 0 : i + 1; }
+
+// Adds v of every active thread to *acc: one atomic per group of coalesced threads
+__device__ inline void AtomicSum(double *acc, double const v)
+{
+  namespace cg = cooperative_groups;
+  auto const   grp = cg::coalesced_threads();
+  double const s = cg::reduce(grp, v, cg::plus<double>());
+  if (grp.thread_rank() == 0) { atomicAdd(acc, s); }
+}
+
+// |(y_old - y_new) / σ + e|², the dual residual of one element (e = (T (x̂ - x)) of the element)
+__device__ inline auto Res2(float2 const yo, float2 const yn, float const sigma, float2 const e) -> double
+{
+  float const rx = (yo.x - yn.x) / sigma + e.x, ry = (yo.y - yn.y) / sigma + e.y;
+  return double(rx) * rx + double(ry) * ry;
+}
 __device__ inline auto Prv(int const i, int const n) -> int { return i == 0 ? n - 1 : i - 1; }
 
 auto Components(Transform const T) -> int
@@ -123,7 +142,8 @@ __device__ inline auto Elem(Vol const &g, Coef const &c, float2 const *__restric
  */
 template <Transform T, ProxKind P>
 __global__ void DualK(Vol const g, Coef const c, float2 const *__restrict__ xh, float2 *__restrict__ y, float const sigma,
-                      float const lambda, int const G, unsigned const mask, long long const nOuter, int const nInner)
+                      float const lambda, int const G, unsigned const mask, long long const nOuter, int const nInner,
+                      float2 const *__restrict__ x, double *__restrict__ res)
 {
   long long const o = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   if (o >= nOuter) { return; }
@@ -154,6 +174,15 @@ __global__ void DualK(Vol const g, Coef const c, float2 const *__restrict__ xh, 
     float2 const yo = y[at];
     return make_float2(fmaf(sigma, e.x, yo.x), fmaf(sigma, e.y, yo.y));
   };
+  double     r2 = 0.;
+  auto const write = [&](int const (&cc)[3], long long const at, float2 const yn) { // y = yn, and the residual
+    if (res) {
+      float2 const yo = y[at];
+      float2 const e = Sub(Elem<T>(g, c, xh, i, j, k, cc[0], cc[1], cc[2]), Elem<T>(g, c, x, i, j, k, cc[0], cc[1], cc[2]));
+      r2 += Res2(yo, yn, sigma, e);
+    }
+    y[at] = yn;
+  };
   if constexpr (P == ProxKind::L2) {
     float n2 = 0.f;
     for (int q = 0; q < nInner; q++) {
@@ -169,7 +198,8 @@ __global__ void DualK(Vol const g, Coef const c, float2 const *__restrict__ xh, 
       int       cc[3];
       long long at;
       coords(q, cc);
-      y[at] = Scale(u(cc, at), f);
+      float2 const yn = Scale(u(cc, at), f);
+      write(cc, at, yn);
     }
   } else {
     int       cc[3];
@@ -177,11 +207,12 @@ __global__ void DualK(Vol const g, Coef const c, float2 const *__restrict__ xh, 
     coords(0, cc);
     float2 const uu = u(cc, at);
     if constexpr (P == ProxKind::L1) {
-      y[at] = Scale(uu, lambda / fmaxf(hypotf(uu.x, uu.y), lambda));
+      write(cc, at, Scale(uu, lambda / fmaxf(hypotf(uu.x, uu.y), lambda)));
     } else { // L1I
-      y[at] = make_float2(0.f, lambda * uu.y / fmaxf(fabsf(uu.y), lambda));
+      write(cc, at, make_float2(0.f, lambda * uu.y / fmaxf(fabsf(uu.y), lambda)));
     }
   }
+  if (res) { AtomicSum(res, r2); }
 }
 
 // X += Tᴴ y, scaled by a on x and by av on v. One thread per element of x (Identity, Grad, GradT, TGV1), or per voxel and
@@ -257,8 +288,17 @@ __device__ inline auto WarpSum(float v) -> float
   return v;
 }
 
+__device__ inline auto WarpSumD(double v) -> double
+{
+  for (int o = 16; o > 0; o >>= 1) {
+    v += __shfl_xor_sync(0xffffffffu, v, o);
+  }
+  return v;
+}
+
 __global__ void LLRK(Vol const g, LLRGeo const L, float2 const *__restrict__ xh, float2 const *__restrict__ y,
-                     float2 *__restrict__ z, float const sigma, float const lambda, int const warps)
+                     float2 *__restrict__ z, float const sigma, float const lambda, int const warps,
+                     float2 const *__restrict__ x, double *__restrict__ res)
 {
   extern __shared__ float2 sh[];
   int const       lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
@@ -349,6 +389,7 @@ __global__ void LLRK(Vol const g, LLRGeo const L, float2 const *__restrict__ xh,
   __syncwarp();
   // Window rows: z(row, j) = Σ_k A(row, k) f_k conj(V(j, k))
   int const nWv = szW[0] * szW[1] * szW[2];
+  double    r2 = 0.;
   for (int q = lane; q < nWv * L.N; q += 32) {
     int const wv = q % nWv, jc = q / nWv;
     int const wx = wv % szW[0], wy = (wv / szW[0]) % szW[1], wz = wv / (szW[0] * szW[1]);
@@ -362,7 +403,13 @@ __global__ void LLRK(Vol const g, LLRGeo const L, float2 const *__restrict__ xh,
       acc.x += f * (a.x * v.x + a.y * v.y);
       acc.y += f * (a.y * v.x - a.x * v.y);
     }
-    z[g.off(stW[0] + wx, stW[1] + wy, stW[2] + wz, jc, 0)] = acc;
+    long long const at = g.off(stW[0] + wx, stW[1] + wy, stW[2] + wz, jc, 0);
+    z[at] = acc;
+    if (res) { r2 += Res2(y[at], acc, sigma, Sub(xh[at], x[at])); }
+  }
+  if (res) {
+    r2 = WarpSumD(r2);
+    if (lane == 0) { atomicAdd(res, r2); }
   }
 }
 
@@ -387,31 +434,37 @@ auto MakeLLR(Term const &t, Vol const &g, int const shift[3]) -> LLRGeo
 // Reductions in double: partial sums per block, added on the host
 constexpr int RBlocks = 1024;
 
-__global__ void ExtrapK(float2 *__restrict__ X, float2 *__restrict__ Xh, long long const n, double *__restrict__ part)
+__global__ void ExtrapK(float2 *__restrict__ X, float2 *__restrict__ Xh, long long const n, long long const nx,
+                        double *__restrict__ part)
 {
-  // Xh holds the previous X: Xh = 2 X - Xh; sums |X|² and |X - Xprev|²
-  __shared__ double s0[Threads], s1[Threads];
-  double            a0 = 0., a1 = 0.;
+  // Xh holds the previous X: Xh = 2 X - Xh; sums |X|², |X - Xprev|² and |X - Xprev|² of the first nx elements (x of [x; v])
+  __shared__ double s0[Threads], s1[Threads], s2[Threads];
+  double            a0 = 0., a1 = 0., a2 = 0.;
   for (long long e = blockIdx.x * (long long)blockDim.x + threadIdx.x; e < n; e += (long long)gridDim.x * blockDim.x) {
     float2 const x = X[e], p = Xh[e];
     float2 const d = make_float2(x.x - p.x, x.y - p.y);
+    double const d2 = double(d.x) * d.x + double(d.y) * d.y;
     a0 += double(x.x) * x.x + double(x.y) * x.y;
-    a1 += double(d.x) * d.x + double(d.y) * d.y;
+    a1 += d2;
+    if (e < nx) { a2 += d2; }
     Xh[e] = make_float2(2.f * x.x - p.x, 2.f * x.y - p.y);
   }
   s0[threadIdx.x] = a0;
   s1[threadIdx.x] = a1;
+  s2[threadIdx.x] = a2;
   __syncthreads();
   for (int o = blockDim.x / 2; o > 0; o >>= 1) {
     if (threadIdx.x < o) {
       s0[threadIdx.x] += s0[threadIdx.x + o];
       s1[threadIdx.x] += s1[threadIdx.x + o];
+      s2[threadIdx.x] += s2[threadIdx.x + o];
     }
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    part[2 * blockIdx.x] = s0[0];
-    part[2 * blockIdx.x + 1] = s1[0];
+    part[3 * blockIdx.x] = s0[0];
+    part[3 * blockIdx.x + 1] = s1[0];
+    part[3 * blockIdx.x + 2] = s2[0];
   }
 }
 
@@ -450,8 +503,8 @@ __global__ void ScaleK(float2 *__restrict__ dst, float2 const *__restrict__ src,
 
 struct Reducer
 {
-  DeviceBuffer        part{2 * RBlocks * sizeof(double)};
-  std::vector<double> h = std::vector<double>(2 * RBlocks);
+  DeviceBuffer        part{3 * RBlocks * sizeof(double)};
+  std::vector<double> h = std::vector<double>(3 * RBlocks);
 
   auto dot(float2 const *a, float2 const *b, long long const n) -> double
   {
@@ -465,18 +518,19 @@ struct Reducer
     return s;
   }
 
-  // Extrapolation, returns |X|² and |ΔX|²
-  auto extrapolate(float2 *X, float2 *Xh, long long const n) -> std::pair<double, double>
+  // Extrapolation, returns |X|², |ΔX|² and |ΔX|² of the first nx elements
+  auto extrapolate(float2 *X, float2 *Xh, long long const n, long long const nx) -> std::tuple<double, double, double>
   {
-    ExtrapK<<<RBlocks, Threads>>>(X, Xh, n, part.as<double>());
+    ExtrapK<<<RBlocks, Threads>>>(X, Xh, n, nx, part.as<double>());
     Check(cudaGetLastError(), "extrapolate");
-    part.download(h.data(), 2 * RBlocks * sizeof(double));
-    double a = 0., b = 0.;
+    part.download(h.data(), 3 * RBlocks * sizeof(double));
+    double a = 0., b = 0., c = 0.;
     for (int i = 0; i < RBlocks; i++) {
-      a += h[2 * i];
-      b += h[2 * i + 1];
+      a += h[3 * i];
+      b += h[3 * i + 1];
+      c += h[3 * i + 2];
     }
-    return {a, b};
+    return {a, b, c};
   }
 };
 
@@ -659,6 +713,31 @@ auto DualBound2(Term const &t, PDHGSetup const &s) -> double
 }
 
 /*
+ * Scales of the residuals (--pdhg-check), fixed by the data so that one tolerance fits different problems (as PDLP's
+ * relative residuals): |AᴴWb| for the primal residual |Kᴴy| (the size of the data term's pull on x at x = 0) and |b|_W for
+ * the dual residual (in the metric of the data term). Uses X and the data dual as scratch and leaves them zero.
+ */
+auto ResidualScales(SNUFFT const &A, PDHGSetup const &s, Vol const &g, DeviceBuffer &bX, DeviceBuffer &bYd,
+                    DeviceBuffer const &bB, long long const nCK, Reducer &red) -> std::pair<double, double>
+{
+  long long const nX = g.N * g.nB;
+  double          n1 = 0., bW = 0.;
+  for (int64_t t = 0; t < s.nT; t++) {
+    auto const X = bX.as<Cxf>() + t * nX;
+    auto const Y = bYd.as<Cxf>() + t * nCK;
+    auto const B = bB.as<Cxf>() + t * nCK;
+    Check(cudaMemcpy(Y, B, nCK * sizeof(float2), cudaMemcpyDeviceToDevice), "copy");
+    A.weightD(Y);
+    A.adjointD(Y, X, 1.f, false);
+    n1 += red.dot(reinterpret_cast<float2 const *>(X), reinterpret_cast<float2 const *>(X), nX);
+    bW += A.weightedNorm2D(B);
+  }
+  bX.zero();
+  bYd.zero();
+  return {std::sqrt(n1), std::sqrt(bW)};
+}
+
+/*
  * Starting value of the automatic step ratio, from the data, before any iteration: the iterates estimate |x*| and |y*|
  * badly while the ratio is far off (a small ratio keeps x small, which pushes the estimate further down). |x*| from one
  * exact line-search step of the weighted least squares from 0, x̃ = α AᴴWb, α = |AᴴWb|² / <AᴴWb, AᴴWA AᴴWb>; the data
@@ -714,10 +793,10 @@ auto PDHGDeviceBytes(PDHGSetup const &s, int64_t const nC, int64_t const nK) -> 
     llr = llr || t.P == ProxKind::LLR;
   }
   if (llr) { n += nI; } // Second buffer for LLR's dual
-  return size_t(n) * sizeof(float2) + 2 * RBlocks * sizeof(double);
+  return size_t(n) * sizeof(float2) + 3 * RBlocks * sizeof(double);
 }
 
-void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float const sigma)
+void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float const sigma, Cxf const *x, double *res)
 {
   Vol const  g = MakeVol(s);
   Coef const c = MakeCoef();
@@ -735,7 +814,8 @@ void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float co
   auto const X = reinterpret_cast<float2 const *>(xh);
   auto const Y = reinterpret_cast<float2 *>(y);
 #define RL_DUAL(TT, PP)                                                                                                        \
-  DualK<TT, PP><<<Blocks(nOuter), Threads>>>(g, c, X, Y, sigma, t.lambda, G, mask, nOuter, nInner)
+  DualK<TT, PP><<<Blocks(nOuter), Threads>>>(g, c, X, Y, sigma, t.lambda, G, mask, nOuter, nInner,                         \
+                                             reinterpret_cast<float2 const *>(x), res)
 #define RL_DUAL_P(TT)                                                                                                          \
   switch (t.P) {                                                                                                               \
   case ProxKind::L1: RL_DUAL(TT, ProxKind::L1); break;                                                                       \
@@ -755,7 +835,8 @@ void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float co
   Check(cudaGetLastError(), "term dual");
 }
 
-void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf *z, float const sigma, int const shift[3])
+void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf *z, float const sigma, int const shift[3],
+             Cxf const *x, double *res)
 {
   if (t.T != Transform::Identity) { throw std::runtime_error("GPU PDHG: LLR acts on the image (identity transform)"); }
   Vol const    g = MakeVol(s);
@@ -766,7 +847,8 @@ void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf
   long long const nWin = (long long)L.nW[0] * L.nW[1] * L.nW[2];
   unsigned const  nb = unsigned((nWin + warps - 1) / warps);
   LLRK<<<nb, 32 * warps, warps * perWarp>>>(g, L, reinterpret_cast<float2 const *>(xh), reinterpret_cast<float2 const *>(y),
-                                            reinterpret_cast<float2 *>(z), sigma, t.lambda, warps);
+                                            reinterpret_cast<float2 *>(z), sigma, t.lambda, warps,
+                                            reinterpret_cast<float2 const *>(x), res);
   Check(cudaGetLastError(), "LLR");
 }
 
@@ -854,14 +936,34 @@ void RunPDHG(SNUFFT const                                    &A,
     ratio = float(DataRatio(A, s, g, st, bX, bXh, bYd, bB, nCK, red, log));
     st.scale(ratio);
   }
+  /* Residuals (checkEvery > 0), for stopping. Primal: the optimality condition for x is Kᴴy = 0 (no prox on x), and
+   * Kᴴy_k = T⁻¹(x_{k-1} - x_k) from the primal step itself: free. Dual: (y_{k-1} - y_k) Σ⁻¹ + K(x̂_{k-1} - x_{k-1}) is how
+   * far y_k is from the dual optimality condition at x_{k-1} (from the prox's own optimality condition), computed in the
+   * dual steps of check iterations (one more forward operator for the data term). Goldstein et al. 2015 ("Adaptive
+   * primal-dual splitting methods for statistical learning and image processing") define the same pair.
+   */
+  double       scaleP = 1., scaleD = 1.;
+  DeviceBuffer bRes(2 * sizeof(double));
+  if (s.checkEvery > 0) {
+    std::tie(scaleP, scaleD) = ResidualScales(A, s, g, bX, bYd, bB, nCK, red);
+    log("Residuals every " + std::to_string(s.checkEvery) + " iterations, relative to |AᴴWb| " + std::to_string(scaleP) +
+        " and |b|_W " + std::to_string(scaleD) + ", tolerance " + std::to_string(s.tol));
+  }
   std::mt19937        gen(std::random_device{}());
   std::vector<float2> hx;
   for (int64_t it = 0; it < s.maxIts; it++) {
     auto const X = bX.as<Cxf>(), Xh = bXh.as<Cxf>();
+    bool const chk = s.checkEvery > 0 && it > 0 && it % s.checkEvery == 0;
+    double    *res = chk ? bRes.as<double>() : nullptr; // [0] data term, [1] the other terms
+    if (chk) { bRes.zero(); }
     // Dual steps at x̂: y = prox*_σ(y + σ K x̂)
     tm.mark(0);
     for (int64_t t = 0; t < s.nT; t++) {
-      A.dataDualD(Xh + t * nX, bYd.as<Cxf>() + t * nCK, bB.as<Cxf>() + t * nCK, st.sD, s.data);
+      if (chk) {
+        A.dataDualD(Xh + t * nX, bYd.as<Cxf>() + t * nCK, bB.as<Cxf>() + t * nCK, st.sD, s.data, X + t * nX, res);
+      } else {
+        A.dataDualD(Xh + t * nX, bYd.as<Cxf>() + t * nCK, bB.as<Cxf>() + t * nCK, st.sD, s.data);
+      }
     }
     tm.mark(1);
     for (size_t ir = 0; ir < s.terms.size(); ir++) {
@@ -874,10 +976,10 @@ void RunPDHG(SNUFFT const                                    &A,
             e = d(gen);
           }
         }
-        LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), st.s[ir], shift);
+        LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), st.s[ir], shift, X, chk ? res + 1 : nullptr);
         std::swap(bY[ir], bZ);
       } else {
-        TermDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir]);
+        TermDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? res + 1 : nullptr);
       }
     }
     // Primal step x = x - τ Kᴴ y (G = 0), then x̂ = 2 x - x_old; x̂ holds x_old meanwhile
@@ -892,12 +994,21 @@ void RunPDHG(SNUFFT const                                    &A,
       TermAdjoint(s.terms[ir], s, bY[ir].as<Cxf>(), X, -st.tx, -st.tv);
     }
     tm.mark(5);
-    auto const [nx2, ndx2] = red.extrapolate(reinterpret_cast<float2 *>(X), reinterpret_cast<float2 *>(Xh), nP);
+    auto const [nx2, ndx2, ndxx2] =
+      red.extrapolate(reinterpret_cast<float2 *>(X), reinterpret_cast<float2 *>(Xh), nP, g.nI);
     tm.mark(6);
     tm.add();
     nIts++;
-    PDHGStatus const ps{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
-    bool const       go = status(ps);
+    PDHGStatus ps{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
+    if (chk) {
+      double r[2];
+      bRes.download(r, 2 * sizeof(double));
+      // |T⁻¹ Δx|: the step of the iteration that just ended (block-wise with per-term steps)
+      double const p2 = ndxx2 / (double(st.tx) * st.tx) + std::max(ndx2 - ndxx2, 0.) / (double(st.tv) * st.tv);
+      ps.primal = float(std::sqrt(p2) / scaleP);
+      ps.dual = float(std::sqrt(r[0] + r[1]) / scaleD);
+    }
+    bool const go = status(ps);
     /* Automatic step ratio. The PDHG error after k iterations is bounded by (|x* - x0|² / τ + |y* - y0|²_Σ⁻¹) / k
      * (Chambolle & Pock 2011); with στ fixed that is smallest for τ / σ = (|x* - x0| / |y* - y0|)², the dual norm in the
      * metric of the dual steps (|y|² / W for the data term). It starts from the data (DataRatio); from x0 = y0 = 0 the
@@ -907,10 +1018,9 @@ void RunPDHG(SNUFFT const                                    &A,
      */
     if (s.autoRatio && it + 1 == nextRatio) {
       nextRatio *= 2;
-      double yd2 = 0., yd2plain = 0., yr2 = 0.;
+      double yd2 = 0., yr2 = 0.;
       for (int64_t t = 0; t < s.nT; t++) {
         yd2 += A.dualNorm2D(bYd.as<Cxf>() + t * nCK);
-        yd2plain += red.dot(bYd.as<float2>() + t * nCK, bYd.as<float2>() + t * nCK, nCK);
       }
       for (size_t ir = 0; ir < s.terms.size(); ir++) {
         auto const y = bY[ir].as<float2>();
@@ -921,14 +1031,13 @@ void RunPDHG(SNUFFT const                                    &A,
       double const xx2 = red.dot(Xp, Xp, g.nI), xv2 = s.tgv ? std::max(nx2 - xx2, 0.) : 0.;
       double const x2m = xx2 / st.tx0 + xv2 / st.tv0;
       double const y2 = yd2 / st.sD0 + yr2;
-      log("|x|² " + std::to_string(nx2) + " |y_data|²_W⁻¹ " + std::to_string(yd2) + " (plain " + std::to_string(yd2plain) +
-          ") |y_terms|² " + std::to_string(yr2));
       if (y2 > 0. && x2m > 0.) {
         double const target = x2m / y2;
         float const  r = std::clamp(float(std::exp(0.5 * std::log(target) + 0.5 * std::log(double(ratio)))), ratio / 2.f,
                                     2.f * ratio);
         log("Step ratio τ/σ " + std::to_string(ratio) + " -> " + std::to_string(r) + " (target (|x|/|y|)² " +
-            std::to_string(target) + ")");
+            std::to_string(target) + ": |x|² " + std::to_string(x2m) + ", |y_data|² " + std::to_string(yd2 / st.sD0) +
+            ", |y_terms|² " + std::to_string(yr2) + ", base metrics)");
         ratio = r;
         st.scale(ratio);
       }
@@ -939,7 +1048,12 @@ void RunPDHG(SNUFFT const                                    &A,
       debug(it, reinterpret_cast<Cxf const *>(hx.data()));
     }
     if (!go) { break; }
-    if (ps.normdx < s.tol * ps.normx) {
+    if (s.checkEvery > 0) {
+      if (chk && ps.primal < s.tol && ps.dual < s.tol) {
+        log("Residual tolerance reached");
+        break;
+      }
+    } else if (ps.normdx < s.tol * ps.normx) {
       log("Δ tolerance reached");
       break;
     }

@@ -22,6 +22,7 @@ auto RunGPU(Cx5 const                                 &data,
   s.ratio = opts.ratio;
   s.autoRatio = opts.autoRatio;
   s.termSteps = opts.termSteps;
+  s.checkEvery = opts.checkEvery;
   s.nT = data.dimension(4);
   Index const                   nTP = data.dimension(0) * data.dimension(1) * data.dimension(2);
   std::vector<gpu::Cxf const *> b(s.nT);
@@ -33,7 +34,12 @@ auto RunGPU(Cx5 const                                 &data,
   Index const nI = s.nx * s.ny * s.nz * s.nB * s.nT;
   Vector      x(nI), xv;
   auto const  status = [](gpu::PDHGStatus const &st) {
-    Log::Print("PDHG", "{:02d}: |x| {:4.3E} |Δx|/|x| {:4.3E}", st.it, st.normx, st.normdx / st.normx);
+    if (st.primal >= 0.f) {
+      Log::Print("PDHG", "{:02d}: |x| {:4.3E} |Δx|/|x| {:4.3E} |P| {:4.3E} |D| {:4.3E}", st.it, st.normx, st.normdx / st.normx,
+                 st.primal, st.dual);
+    } else {
+      Log::Print("PDHG", "{:02d}: |x| {:4.3E} |Δx|/|x| {:4.3E}", st.it, st.normx, st.normdx / st.normx);
+    }
     return !Iterating::ShouldStop("PDHG");
   };
   std::function<void(int64_t, gpu::Cxf const *)> dbg = nullptr;

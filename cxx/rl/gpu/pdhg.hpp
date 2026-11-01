@@ -60,13 +60,15 @@ struct PDHGSetup
   int               lanczosIts = 24;
   float             ratio = 1.f;  // τ / σ (primal over dual step); στ = 1/L
   bool              termSteps = false; // Per-term steps (Pock & Chambolle 2011, block form) instead of σ, τ for all
+  int64_t           checkEvery = 0; // > 0: primal and dual residuals every so many iterations, stop when both < tol
   bool              autoRatio = false; // Start ratio from the data, then adapt to (|x|/|y|)² at 50, 100, ... (RunPDHG)
 };
 
 struct PDHGStatus
 {
   int64_t it;
-  float   normx, normdx; // |[x; v]| and |Δ[x; v]| after the iteration
+  float   normx, normdx;          // |[x; v]| and |Δ[x; v]| after the iteration
+  float   primal = -1.f, dual = -1.f; // Relative residuals at check iterations (checkEvery), else -1
 };
 
 // Size of the transform's output for an image of n = nx ny nz nB nT elements
@@ -92,11 +94,14 @@ void RunPDHG(SNUFFT const                                        &A,
 /*
  * Building blocks, exposed for the tests (device pointers). xh: [x; v] (v only with TGV), y: the term's dual.
  * TermDual: y = conj prox_σ(y + σ T xh) for L1, L1I and L2 terms; LLRDual: the same for LLR terms (identity transform),
+ * both optionally adding |(y_old - y_new) / σ + T (xh - x)|² (the dual residual) to *res (device);
  * written to z (the patches overlap neighbouring windows, so not in place). TermAdjoint: X += Tᴴ y scaled by ax on the
  * x part and by av on the v part (TGV).
  */
-void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float sigma);
-void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf *z, float sigma, int const shift[3]);
+void TermDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf *y, float sigma, Cxf const *x = nullptr,
+              double *res = nullptr);
+void LLRDual(Term const &t, PDHGSetup const &s, Cxf const *xh, Cxf const *y, Cxf *z, float sigma, int const shift[3],
+             Cxf const *x = nullptr, double *res = nullptr);
 void TermAdjoint(Term const &t, PDHGSetup const &s, Cxf const *y, Cxf *X, float ax, float av);
 
 } // namespace rl::gpu

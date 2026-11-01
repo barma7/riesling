@@ -1,6 +1,8 @@
 #include "snufft.hpp"
 
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 #include <cufft.h>
 
 #include <algorithm>
@@ -84,7 +86,18 @@ struct Dual
   float2 const *b = nullptr; // Data, device order
   float         sigma = 0.f;
   int           kind = 0;
+  float2 const *adx = nullptr; // A (x̂ - x) of this channel, per sample (residual), or nullptr
+  double       *res = nullptr; // Adds Σ W |(y_old - y_new) / (σW) + A (x̂ - x)|²
 };
+
+// Adds v of every active thread to *acc: one atomic per group of coalesced threads
+__device__ inline void AtomicSum(double *acc, double const v)
+{
+  namespace cg = cooperative_groups;
+  auto const   grp = cg::coalesced_threads();
+  double const s = cg::reduce(grp, v, cg::plus<double>());
+  if (grp.thread_rank() == 0) { atomicAdd(acc, s); }
+}
 
 __device__ inline auto CMul(float2 const a, float2 const b) -> float2
 {
@@ -116,7 +129,8 @@ __global__ void Expand(Geo const g,
                        float const *__restrict__ apo,
                        float2 *__restrict__ ws,
                        int const   c,
-                       float const s)
+                       float const s,
+                       float2 const *__restrict__ x2 = nullptr) // Expands x - x2 if given
 {
   long long const gi = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   if (gi >= g.G) { return; }
@@ -135,7 +149,11 @@ __global__ void Expand(Geo const g,
   float const     a = apo[v];
   for (int b = 0; b < g.nB; b++) {
     int const    mb = (g.nMB == 1) ? 0 : b;
-    float2 const xv = x[v + g.N * b];
+    float2       xv = x[v + g.N * b];
+    if (x2) {
+      float2 const o = x2[v + g.N * b];
+      xv = make_float2(xv.x - o.x, xv.y - o.y);
+    }
     float2 const m = maps[v + g.N * (mb + (long long)g.nMB * c)];
     float const  tr = fmaf(xv.x, m.x, -(xv.y * m.y));
     float const  ti = fmaf(xv.x, m.y, xv.y * m.x);
@@ -277,7 +295,13 @@ template <int FW, int NBT> __global__ void __launch_bounds__(256) Interp(Geo con
     float const     sw = d.sigma * W;
     float2          u = make_float2(fmaf(sw, y.x - bo.x, yo.x), fmaf(sw, y.y - bo.y, yo.y));
     float const     f = d.kind == 1 ? 1.f / (1.f + sw) : (d.kind == 2 ? 1.f / (1.f + d.sigma) : 1.f / fmaxf(hypotf(u.x, u.y), 1.f));
-    d.y[o] = make_float2(u.x * f, u.y * f);
+    float2 const    yn = make_float2(u.x * f, u.y * f);
+    d.y[o] = yn;
+    if (d.res) {
+      float2 const a = d.adx[is];
+      float const  rx = (yo.x - yn.x) / sw + a.x, ry = (yo.y - yn.y) / sw + a.y;
+      AtomicSum(d.res, double(W) * (double(rx) * rx + double(ry) * ry));
+    }
     return;
   }
   if (weighted) {
@@ -1098,6 +1122,12 @@ void SNUFFT::normalD(Cxf const *x, Cxf *y, float const s) const
 
 void SNUFFT::dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float const sigma, DataDual const kind) const
 {
+  dataDualD(xhat, y, b, sigma, kind, nullptr, nullptr);
+}
+
+void SNUFFT::dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float const sigma, DataDual const kind, Cxf const *x,
+                       double *res) const
+{
   auto const &m = *impl_;
   auto const  xd = reinterpret_cast<float2 const *>(xhat);
   Dual        d;
@@ -1105,7 +1135,17 @@ void SNUFFT::dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float const sigma,
   d.b = reinterpret_cast<float2 const *>(b);
   d.sigma = sigma;
   d.kind = int(kind);
+  if (res) {
+    d.adx = m.yk.p;
+    d.res = res;
+  }
   for (int c = 0; c < m.geo.nC; c++) {
+    if (res) { // A (x̂ - x) of this channel into yk, for the residual
+      Expand<<<Blocks(m.geo.G), Threads>>>(m.geo, xd, m.maps.p, m.apo.p, m.ws.p, c, 1.f, reinterpret_cast<float2 const *>(x));
+      Check(cudaGetLastError(), "expand");
+      m.fft(true);
+      m.interp(c, false, m.yk.p, false);
+    }
     Expand<<<Blocks(m.geo.G), Threads>>>(m.geo, xd, m.maps.p, m.apo.p, m.ws.p, c, 1.f);
     Check(cudaGetLastError(), "expand");
     m.fft(true);

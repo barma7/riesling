@@ -118,6 +118,10 @@ public:
    * u / (1 + σ) (WLS) or u / max(|u|, 1) (LAD). W: the k-space weights of the setup (1 without).
    */
   void dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float sigma, DataDual kind) const;
+  /* The same, and adds the squared W-norm of the dual residual (y_old - y_new) / (σW) + A (x̂ - x) to *res (device
+   * pointer, one double): how far y_new is from the dual optimality condition at x (one more forward operator).
+   */
+  void dataDualD(Cxf const *xhat, Cxf *y, Cxf const *b, float sigma, DataDual kind, Cxf const *x, double *res) const;
   void sync() const; // Wait for the device
   // Σ |y|² / W over a k-space vector in device order: the norm of a data-term dual in the metric of its dual step σW
   auto dualNorm2D(Cxf const *y) const -> double;

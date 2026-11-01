@@ -18,6 +18,7 @@ struct Opts
   Index imax;
   float tol, λE; // λE: λmax(A'PA), <= 0 to estimate it
   float ratio = 1.f; // τ / σ, the primal over the dual step (στ = 1/L either way)
+  Index checkEvery = 0;    // > 0: residual stopping test every so many iterations (GPU only)
   bool  termSteps = false; // Per-term steps (Pock & Chambolle 2011, block form); GPU only
   bool  autoRatio = false; // Start from the data, then adapt to (|x|/|y|)² at 50, 100, ... (pdhg.cpp, DataRatio)
 };

@@ -68,7 +68,7 @@ struct LSMRArgs
 struct PDHGArgs
 {
   args::Flag             adaptive, lad, weighted;
-  args::ValueFlag<Index> its;
+  args::ValueFlag<Index> its, check;
   args::ValueFlag<float> tol, λE, ratio;
   args::Flag             autoRatio, termSteps;
 
