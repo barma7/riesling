@@ -153,13 +153,13 @@ auto Regularizers(RegOpts &opts, TOps::TOp<5, 5>::Ptr const &recon) -> Regulariz
 
   if (opts.l1) {
     Proxs::Prox::Ptr prox;
-    if (opts.iso) {
+    if (opts.iso) { // The images are (i, j, k, b, t): b is dimension 3, t dimension 4
       if (opts.iso.Get() == "b") {
-        prox = std::make_shared<Proxs::L2<5, 1>>(opts.l1.Get(), shape, Sz1{4});
+        prox = std::make_shared<Proxs::L2<5, 1>>(opts.l1.Get(), shape, Sz1{3});
       } else if (opts.iso.Get() == "t") {
-        prox = std::make_shared<Proxs::L2<5, 1>>(opts.l1.Get(), shape, Sz1{5});
+        prox = std::make_shared<Proxs::L2<5, 1>>(opts.l1.Get(), shape, Sz1{4});
       } else if (opts.iso.Get() == "bt") {
-        prox = std::make_shared<Proxs::L2<5, 2>>(opts.l1.Get(), shape, Sz2{4, 5});
+        prox = std::make_shared<Proxs::L2<5, 2>>(opts.l1.Get(), shape, Sz2{3, 4});
       } else {
         throw Log::Failure("Regs", "Valid dims are bt");
       }
@@ -230,8 +230,12 @@ auto GPURegularizers(RegOpts &opts, Sz5 const shape) -> GPURegularizers_t
                        .norm2 = 1.f});
   }
   if (opts.l1) {
-    if (opts.iso) { throw Log::Failure("Regs", "--l1 with --iso is not implemented in the GPU PDHG"); }
-    r.terms.push_back({.T = Transform::Identity, .P = ProxKind::L1, .lambda = opts.l1.Get(), .norm2 = 1.f});
+    if (opts.iso && opts.iso.Get() != "b" && opts.iso.Get() != "t" && opts.iso.Get() != "bt") {
+      throw Log::Failure("Regs", "Valid dims are bt");
+    }
+    unsigned const mask = opts.iso ? IsoMask(opts.iso.Get(), "bt") : 0u;
+    r.terms.push_back({.T = Transform::Identity, .P = opts.iso ? ProxKind::L2 : ProxKind::L1, .lambda = opts.l1.Get(),
+                       .normMask = mask, .norm2 = 1.f});
   }
   if (opts.l1i) { r.terms.push_back({.T = Transform::Identity, .P = ProxKind::L1I, .lambda = opts.l1i.Get(), .norm2 = 1.f}); }
   if (r.terms.empty()) { throw Log::Failure("Reg", "Must specify at least one regularizer"); }
