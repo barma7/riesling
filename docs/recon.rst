@@ -95,7 +95,7 @@ See `denoise`_. The same regularizers are available for ``recon-rlsq``.
 
 * ``--max-its0=N``, ``--max-its1=N``, ``--atol=A``, ``--btol=B``, ``--ctol=C``
 
-    These control the inner optimization for ADMM (the x update step). As this step is warm-started, it is possible to control the maximum number of iterations for the zeroth and subsequent steps independently (default 64 each). The tolerances only apply to LSMR: the CG x-update always runs exactly this many iterations. Because it is warm-started, far fewer are usually enough; around 10 per outer iteration is a good starting point, and more inner iterations often reach a given accuracy in less total time than very few.
+    These control the inner optimization for ADMM (the x update step). As this step is warm-started, it is possible to control the maximum number of iterations for the zeroth and subsequent steps independently (default 12 each; earlier versions used 64). The tolerances only apply to LSMR: the CG x-update always runs exactly this many iterations. Very few inner iterations make each outer iteration cheaper but need many more outer iterations; in tests 12 reached a given accuracy several times sooner than 3.
 
 * ``--admm-inner=cg/lsmr``
 

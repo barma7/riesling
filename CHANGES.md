@@ -10,7 +10,8 @@ sizes. Background and references: `docs/design.rst`.
   temporary; one-pass kernels for the SENSE adjoint, the TV/TGV gradients and the isotropic L2 prox; ADMM vector
   operations on all threads, its work vectors allocated once, faster norms.
 - ADMM: the x-update now uses CG on the normal equations by default (`--admm-inner=lsmr` for the previous solver): less
-  memory, no extra operator pass for the warm start. The residual-balancing tolerance `--mu` defaults to 10 (was 1.2).
+  memory, no extra operator pass for the warm start. Inner iterations `--max-its0` / `--max-its1` default to 12 (were
+  64). The residual-balancing tolerance `--mu` defaults to 10 (was 1.2).
 - `--split-time` solves independent time points one after the other (ADMM and PDHG), so only one is in memory.
 - GPU (build option `RL_CUDA`, option `--gpu`): a CUDA SENSE + NUFFT operator, the same operator as the CPU's; the ADMM
   x-update uses its normal operator; `--pdhg --gpu` runs the whole PDHG iteration on the GPU for every regularizer.
