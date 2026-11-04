@@ -1161,7 +1161,7 @@ void RunPDHG(SNUFFT const                                    &A,
    * primal-dual splitting methods for statistical learning and image processing") define the same pair.
    */
   double       scaleP = 1., scaleD = 1.;
-  DeviceBuffer bRes(2 * sizeof(double));
+  DeviceBuffer bRes((1 + s.terms.size()) * sizeof(double)); // [0] data term, [1 + i] term i
   if (s.checkEvery > 0) {
     std::tie(scaleP, scaleD) = ResidualScales(A, s, g, bX, bYd, bB, nCK, red);
     log("Residuals every " + std::to_string(s.checkEvery) + " iterations, relative to |AᴴWb| " + std::to_string(scaleP) +
@@ -1172,7 +1172,7 @@ void RunPDHG(SNUFFT const                                    &A,
   for (int64_t it = 0; it < s.maxIts; it++) {
     auto const X = bX.as<Cxf>(), Xh = bXh.as<Cxf>();
     bool const chk = s.checkEvery > 0 && it > 0 && it % s.checkEvery == 0;
-    double    *res = chk ? bRes.as<double>() : nullptr; // [0] data term, [1] the other terms
+    double    *res = chk ? bRes.as<double>() : nullptr;
     if (chk) { bRes.zero(); }
     // Dual steps at x̂: y = prox*_σ(y + σ K x̂)
     tm.mark(0);
@@ -1194,13 +1194,13 @@ void RunPDHG(SNUFFT const                                    &A,
             e = d(gen);
           }
         }
-        LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), st.s[ir], shift, X, chk ? res + 1 : nullptr);
+        LLRDual(t, s, Xh, bY[ir].as<Cxf>(), bZ.as<Cxf>(), st.s[ir], shift, X, chk ? res + 1 + ir : nullptr);
         std::swap(bY[ir], bZ);
       } else if (t.P == ProxKind::Wavelets) {
         if (chk) { Check(cudaMemcpyAsync(bZ.as<Cxf>(), bY[ir].as<Cxf>(), g.nI * sizeof(float2), cudaMemcpyDeviceToDevice), "copy"); }
-        WaveletDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? bZ.as<Cxf>() : nullptr, chk ? res + 1 : nullptr);
+        WaveletDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? bZ.as<Cxf>() : nullptr, chk ? res + 1 + ir : nullptr);
       } else {
-        TermDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? res + 1 : nullptr);
+        TermDual(t, s, Xh, bY[ir].as<Cxf>(), st.s[ir], X, chk ? res + 1 + ir : nullptr);
       }
     }
     // Primal step x = x - τ Kᴴ y (G = 0), then x̂ = 2 x - x_old; x̂ holds x_old meanwhile
@@ -1222,12 +1222,22 @@ void RunPDHG(SNUFFT const                                    &A,
     nIts++;
     PDHGStatus ps{it, float(std::sqrt(nx2)), float(std::sqrt(ndx2))};
     if (chk) {
-      double r[2];
-      bRes.download(r, 2 * sizeof(double));
+      std::vector<double> r(1 + s.terms.size());
+      bRes.download(r.data(), r.size() * sizeof(double));
       // |T⁻¹ Δx|: the step of the iteration that just ended (block-wise with per-term steps)
       double const p2 = ndxx2 / (double(st.tx) * st.tx) + std::max(ndx2 - ndxx2, 0.) / (double(st.tv) * st.tv);
       ps.primal = float(std::sqrt(p2) / scaleP);
-      ps.dual = float(std::sqrt(r[0] + r[1]) / scaleD);
+      double d2 = 0.;
+      for (double const e : r) {
+        d2 += e;
+      }
+      ps.dual = float(std::sqrt(d2) / scaleD);
+      ps.dualData = float(std::sqrt(r[0]) / scaleD);
+      for (size_t ir = 0; ir < s.terms.size(); ir++) {
+        ps.dualTerms.push_back(float(std::sqrt(r[1 + ir]) / scaleD));
+      }
+      ps.normxx = float(std::sqrt(red.dot(reinterpret_cast<float2 const *>(X), reinterpret_cast<float2 const *>(X), g.nI)));
+      ps.normdxx = float(std::sqrt(ndxx2));
     }
     bool const go = status(ps);
     /* Automatic step ratio. The PDHG error after k iterations is bounded by (|x* - x0|² / τ + |y* - y0|²_Σ⁻¹) / k

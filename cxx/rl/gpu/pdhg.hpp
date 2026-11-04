@@ -73,6 +73,11 @@ struct PDHGStatus
   int64_t it;
   float   normx, normdx;          // |[x; v]| and |Δ[x; v]| after the iteration
   float   primal = -1.f, dual = -1.f; // Relative residuals at check iterations (checkEvery), else -1
+  // Check iterations only, for diagnosis: the parts of the above. dual² = dualData² + Σ dualTerms², relative to the same
+  // |b|_W; the image x alone, without TGV's v
+  float              dualData = -1.f;
+  std::vector<float> dualTerms;
+  float              normxx = -1.f, normdxx = -1.f;
 };
 
 // Size of the transform's output for an image of n = nx ny nz nB nT elements

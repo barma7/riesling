@@ -33,10 +33,21 @@ auto RunGPU(Cx5 const                                 &data,
              s.terms.size(), s.nT, s.nT > 1 ? "s" : "");
   Index const nI = s.nx * s.ny * s.nz * s.nB * s.nT;
   Vector      x(nI), xv;
-  auto const  status = [](gpu::PDHGStatus const &st) {
+  auto const  status = [tgv = s.tgv](gpu::PDHGStatus const &st) {
     if (st.primal >= 0.f) {
-      Log::Print("PDHG", "{:02d}: |x| {:4.3E} |Δx|/|x| {:4.3E} |P| {:4.3E} |D| {:4.3E}", st.it, st.normx, st.normdx / st.normx,
-                 st.primal, st.dual);
+      // The residual's parts, and the image's own step (with TGV |x| and |Δx| above are those of [x; v])
+      std::string parts = fmt::format("D_data {:4.3E} D_terms", st.dualData);
+      for (float const d : st.dualTerms) {
+        parts += fmt::format(" {:4.3E}", d);
+      }
+      parts += fmt::format(" |Δimg|/|img| {:4.3E}", st.normdxx / st.normxx);
+      if (tgv) {
+        float const nv2 = st.normx * st.normx - st.normxx * st.normxx;
+        float const dv2 = st.normdx * st.normdx - st.normdxx * st.normdxx;
+        if (nv2 > 0.f && dv2 > 0.f) { parts += fmt::format(" |Δv|/|v| {:4.3E}", std::sqrt(dv2 / nv2)); }
+      }
+      Log::Print("PDHG", "{:02d}: |x| {:4.3E} |Δx|/|x| {:4.3E} |P| {:4.3E} |D| {:4.3E} {}", st.it, st.normx, st.normdx / st.normx,
+                 st.primal, st.dual, parts);
     } else {
       Log::Print("PDHG", "{:02d}: |x| {:4.3E} |Δx|/|x| {:4.3E}", st.it, st.normx, st.normdx / st.normx);
     }
