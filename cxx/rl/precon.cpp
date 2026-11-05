@@ -11,136 +11,208 @@
 
 #include "log/debug.hpp"
 
+#include <vector>
+
 namespace rl {
 
-/*
- * Frank Ong's Preconditioner from https://ieeexplore.ieee.org/document/8906069/
- *
- * This is the version without SENSE maps. It still needs the auto-correlation step in the middle, I think to remove the effect
- * of the cropping during the NUFFT. I also tested simply grid adj * grid, which gave reasonable results but would do a double
- * convolution with the gridding kernel.
- */
+namespace {
+using DCx = std::complex<double>;
+
+auto BasisValue(Basis::CPtr basis, Index b, Index s, Index t) -> DCx
+{
+  if (!basis) { return 1.; }
+  return DCx(basis->B(b, s % basis->nSample(), t % basis->nTrace())) * double(basis->scale);
+}
+
+void CheckInputs(float λ, Basis::CPtr basis)
+{
+  if (!std::isfinite(λ) || λ < 0.f) { throw Log::Failure("Precon", "Regularization must be finite and nonnegative"); }
+  if (basis) {
+    if (!std::isfinite(basis->scale) || basis->nB() < 1 || basis->nSample() < 1 || basis->nTrace() < 1) {
+      throw Log::Failure("Precon", "Invalid basis dimensions or scale");
+    }
+    for (Index i = 0; i < basis->B.size(); ++i) {
+      if (!std::isfinite(basis->B.data()[i].real()) || !std::isfinite(basis->B.data()[i].imag())) {
+        throw Log::Failure("Precon", "Basis entries must be finite");
+      }
+    }
+  }
+}
+
+// q_bd(i) conj(q_bd(j)) sums to |B(i)^H B(j)|^2. Stream scalar NUFFTs,
+// rather than allocating K^2 image grids. Do not construct a Basis here: its
+// normalization belongs to the encoding and must not be applied a second time.
+auto ProductFeature(Basis::CPtr basis, Index b, Index d, Cx3 &q) -> bool
+{
+  if (basis) {
+    bool overlap = false;
+    for (Index t = 0; t < basis->nTrace(); ++t) {
+      for (Index s = 0; s < basis->nSample(); ++s) {
+        overlap = overlap || (basis->B(b, s, t) != Cx(0.f) && basis->B(d, s, t) != Cx(0.f));
+      }
+    }
+    if (!overlap || basis->scale == 0.f) { return false; }
+  }
+  bool nonzero = false;
+  for (Index t = 0; t < q.dimension(2); ++t) {
+    for (Index s = 0; s < q.dimension(1); ++s) {
+      auto const v = BasisValue(basis, b, s, t) * std::conj(BasisValue(basis, d, s, t));
+      q(0, s, t) = Cx(v);
+      nonzero = nonzero || v != DCx(0.);
+    }
+  }
+  return nonzero;
+}
+
+// Normalize the target feature before multiplying, using double precision for
+// the ratio. This also handles tiny (but nonzero) basis rows without a 0/0.
+void Accumulate(Re3 &denom, Index channel, Cx3 const &value, Basis::CPtr basis,
+                Index b, Index d, std::vector<double> const &mapNorm, float scale, float multiplicity)
+{
+  Index const nB = basis ? basis->nB() : 1;
+  for (Index t = 0; t < value.dimension(2); ++t) {
+    for (Index s = 0; s < value.dimension(1); ++s) {
+      double norm = 0.;
+      for (Index k = 0; k < nB; ++k) { norm += std::norm(BasisValue(basis, k, s, t)) * mapNorm[k]; }
+      if (norm == 0.) { continue; }
+      auto const q = BasisValue(basis, b, s, t) * std::conj(BasisValue(basis, d, s, t)) / norm;
+      denom(channel, s, t) += float((q * DCx(value(0, s, t))).real() * scale * multiplicity);
+    }
+  }
+}
+
+auto Invert(Re3 weights, Basis::CPtr basis, std::vector<std::vector<double>> const &norms, Re3 const &points, float λ) -> Re3
+{
+  for (Index t = 0; t < weights.dimension(2); ++t) {
+    for (Index s = 0; s < weights.dimension(1); ++s) {
+      for (Index c = 0; c < weights.dimension(0); ++c) {
+        double norm = 0.;
+        for (Index b = 0; b < Index(norms[c].size()); ++b) { norm += std::norm(BasisValue(basis, b, s, t)) * norms[c][b]; }
+        for (Index axis = 0; axis < points.dimension(0); ++axis) {
+          if (!std::isfinite(points(axis, s, t))) { norm = 0.; }
+        }
+        float const den = weights(c, s, t);
+        if (norm > 0. && (!std::isfinite(den) || den <= 0.f)) {
+          throw Log::Failure("Precon", "Nonpositive or nonfinite row denominator {} at channel {} sample {} trace {}", den, c, s, t);
+        }
+        weights(c, s, t) = norm == 0. ? 1.f : (1.f + λ) / (den + λ);
+        if (!std::isfinite(weights(c, s, t)) || weights(c, s, t) <= 0.f) {
+          throw Log::Failure("Precon", "Generated weight was not finite and positive");
+        }
+      }
+    }
+  }
+  Log::Print("Precon", "Finished min {} max {}", Minimum(weights), Maximum(weights));
+  return weights;
+}
+} // namespace
+
+/* Ong, Uecker & Lustig (2020), section VI:
+ * p_i = ||a_i||^2 / sum_j |a_i^H a_j|^2.
+ * The spatial autocorrelation accounts for the nominal image support. */
 template <int ND> auto KSpaceSingle(GridOpts<ND> const &gridOpts, TrajectoryN<ND> const &traj, float const λ, Basis::CPtr basis)
   -> Re2
 {
-  Log::Print("Precon", "Starting preconditioner calculation, λ {}", λ);
+  CheckInputs(λ, basis);
+  Log::Print("Precon", "Ong squared-overlap weights, basis rank {}, regularization {}", basis ? basis->nB() : 0, λ);
   TrajectoryN<ND> newTraj(traj.points() * 2.f, MulToEven(traj.matrix(), 2), traj.voxelSize() / 2.f);
-  TOps::NUFFT<ND> nufft(gridOpts, newTraj, 1, basis);
-  CxN<ND + 2>     psf(nufft.ishape);
-  Cx3             W(nufft.oshape);
-
-  W.setConstant(1.f);
-  nufft.adjoint(W, psf);
-  CxN<ND + 2> ones(AddBack(traj.matrix(), psf.dimension(ND), psf.dimension(ND + 1)));
+  TOps::NUFFT<ND> nufft(gridOpts, newTraj, 1, nullptr);
+  CxN<ND + 2> psf(nufft.ishape), xcor(nufft.ishape), temp(nufft.ishape);
+  CxN<ND + 2> ones(AddBack(traj.matrix(), 1, 1));
   ones.setConstant(1.f);
-  TOps::Pad<ND + 2> padX(ones.dimensions(), psf.dimensions());
-  CxN<ND + 2>       xcor(padX.oshape);
-  xcor.device(Threads::TensorDevice()) = padX.forward(ones);
+  TOps::Pad<ND + 2> pad(ones.dimensions(), nufft.ishape);
+  pad.forward(ones, xcor);
   FFT::Forward(xcor, FirstN<ND>(Sz3{0, 1, 2}));
   xcor.device(Threads::TensorDevice()) = xcor * xcor.conjugate();
   FFT::Adjoint(xcor, FirstN<ND>(Sz3{0, 1, 2}));
-  if constexpr (ND == 3) {
-    Log::Tensor("psf", FirstN<4>(psf.dimensions()), psf.data(), {"i", "j", "k", "b"});
-    Log::Tensor("xcor", FirstN<4>(xcor.dimensions()), xcor.data(), {"i", "j", "k", "b"});
-  }
-  xcor.device(Threads::TensorDevice()) = xcor * psf;
-  if constexpr (ND == 3) { Log::Tensor("xcor2", FirstN<4>(xcor.dimensions()), xcor.data(), {"i", "j", "k", "b"}); }
-  // I do not understand this scaling factor but it's in Frank's code and works
-  float scale =
-    std::pow(Product(FirstN<ND>(psf.dimensions())), 1.5f) / Product(traj.matrix()) / Product(FirstN<ND>(ones.dimensions()));
+  float const scale = std::pow(Product(FirstN<ND>(psf.dimensions())), 1.5f) /
+                      Product(traj.matrix()) / Product(traj.matrix());
+  Cx3 q(nufft.oshape), input(nufft.oshape), value(nufft.oshape);
   Re3 weights(nufft.oshape);
-  weights.device(Threads::TensorDevice()) = nufft.forward(xcor).abs() * scale;
-  if constexpr (ND == 3) { Log::Tensor("w", LastN<2>(weights.dimensions()), weights.data(), {"s", "t"}); }
-  Log::Print("Precon", "Before inversion min {} max {}", Minimum(weights), Maximum(weights));
-  weights.device(Threads::TensorDevice()) = (weights + weights.constant(λ)) / weights.constant(1.f + λ);
-  weights.device(Threads::TensorDevice()) = (weights == 0.f).select(weights.constant(1.f), weights);
-  weights.device(Threads::TensorDevice()) = weights.constant(1.f) / weights;
-
-  float const norm = Norm<true>(weights);
-  if (!std::isfinite(norm)) {
-    throw Log::Failure("Precon", "Single-channel pre-conditioner norm was not finite ({})", norm);
-  } else {
-    Log::Print("Precon", "Single-channel pre-conditioner finished min {} max {}", Minimum(weights), Maximum(weights));
+  weights.setZero();
+  Index const nB = basis ? basis->nB() : 1;
+  std::vector<double> const norms(nB, 1.);
+  for (Index b = 0; b < nB; ++b) {
+    for (Index d = b; d < nB; ++d) {
+      if (!ProductFeature(basis, b, d, q)) { continue; }
+      input.device(Threads::TensorDevice()) = q.conjugate();
+      nufft.adjoint(input, psf);
+      temp.device(Threads::TensorDevice()) = psf * xcor;
+      nufft.forward(temp, value);
+      // The spatial kernel is real: reversed complex products are conjugates.
+      Accumulate(weights, 0, value, basis, b, d, norms, scale, b == d ? 1.f : 2.f);
+    }
   }
-  return weights.chip<0>(0);
+  return Invert(std::move(weights), basis, {norms}, traj.points(), λ).template chip<0>(0);
 }
 
 template auto KSpaceSingle(GridOpts<2> const &, TrajectoryN<2> const &, float const, Basis::CPtr) -> Re2;
 template auto KSpaceSingle(GridOpts<3> const &, TrajectoryN<3> const &, float const, Basis::CPtr) -> Re2;
 
-/*
- * Frank Ong's Preconditioner from https://ieeexplore.ieee.org/document/8906069/
- * (without SENSE maps)
- */
 auto KSpaceMulti(Cx5 const &smaps, GridOpts<3> const &gridOpts, Trajectory const &traj, float const λ, Basis::CPtr basis) -> Re3
 {
-  Log::Print("Precon", "Calculating multichannel-preconditioner");
-  Trajectory  newTraj(traj.points() * 2.f, MulToEven(traj.matrix(), 2), traj.voxelSize() / 2.f);
-  Index const nC = smaps.dimension(4);
-  Index const nSamp = traj.nSamples();
-  Index const nTrace = traj.nTraces();
-  Re3         weights(nC, nSamp, nTrace);
-
-  auto        nufft = TOps::NUFFT<3>(gridOpts, newTraj, 1, basis);
-  Sz5 const   psfShape = nufft.ishape;
-  Sz5 const   smapShape = smaps.dimensions();
-  Index const nB = smapShape[3];
-  if (nB > 1 && nB != psfShape[3]) {
-    throw Log::Failure("Precon", "SENSE maps had basis dimension {}, expected {}", nB, psfShape[3]);
-  }
-  Cx3 W(nufft.oshape);
-  Cx5 psf(psfShape);
-  W.setConstant(Cx(1.f, 0.f));
-  nufft.adjoint(W, psf);
-
-  // I do not understand this scaling factor but it's in Frank's code and works
-  float scale = std::pow(Product(FirstN<3>(psfShape)), 1.5f) / Product(traj.matrix());
-  Log::Print("Precon", "Map shape {} scale {}", smapShape, scale);
-
-  Sz5 const smap1Shape = AddBack(FirstN<3>(smapShape), nB, 1);
-  Sz5 const xcor1Shape = AddBack(FirstN<3>(psfShape), nB, 1);
-
-  auto      padXC = TOps::Pad<5>(smap1Shape, xcor1Shape);
-  Cx5       smap1(smap1Shape), xcorTemp(xcor1Shape), xcor1(xcor1Shape), xcor(psfShape);
-  Sz3 const slSz{1, nSamp, nTrace};
-  for (Index si = 0; si < nC; si++) {
-    float const ni = Norm2<true>(smaps.chip<1>(si));
-    xcor1.setZero();
-    for (Index sj = 0; sj < nC; sj++) {
-      // Log::Print("Precon", "Cross-correlation channel {}-{}", si, sj);
-      smap1.device(Threads::TensorDevice()) =
-        smaps.slice(Sz5{0, 0, 0, 0, si}, smap1Shape) * smaps.slice(Sz5{0, 0, 0, 0, sj}, smap1Shape).conjugate();
-      padXC.forward(smap1, xcorTemp);
-      FFT::Forward(xcorTemp, Sz3{0, 1, 2});
-      xcor1.device(Threads::TensorDevice()) += xcorTemp * xcorTemp.conjugate();
+  CheckInputs(λ, basis);
+  Log::Print("Precon", "Ong squared-overlap weights, basis rank {}, regularization {}", basis ? basis->nB() : 0, λ);
+  Index const nB = basis ? basis->nB() : 1, nMB = smaps.dimension(3), nC = smaps.dimension(4);
+  if (nMB != 1 && nMB != nB) { throw Log::Failure("Precon", "SENSE maps had basis dimension {}, expected 1 or {}", nMB, nB); }
+  for (Index i = 0; i < smaps.size(); ++i) {
+    if (!std::isfinite(smaps.data()[i].real()) || !std::isfinite(smaps.data()[i].imag())) {
+      throw Log::Failure("Precon", "SENSE maps must be finite");
     }
-    Log::Print("Precon", "Channel {} map squared norm {}", si, ni);
-    FFT::Adjoint(xcor1, Sz3{0, 1, 2});
-    if (nB == 1 && nB != psfShape[3]) {
-      xcor.device(Threads::TensorDevice()) = xcor1.broadcast(Sz5{1, 1, 1, psfShape[3], 1}) * psf;
-    } else {
-      xcor.device(Threads::TensorDevice()) = xcor1 * psf;
+  }
+  Trajectory newTraj(traj.points() * 2.f, MulToEven(traj.matrix(), 2), traj.voxelSize() / 2.f);
+  TOps::NUFFT<3> nufft(gridOpts, newTraj, 1, nullptr);
+  Sz5 const mapShape = AddBack(FirstN<3>(smaps.dimensions()), 1, 1);
+  TOps::Pad<5> pad(mapShape, nufft.ishape);
+  Cx5 map(mapShape), fb(nufft.ishape), fd(nufft.ishape), xcor(nufft.ishape), psf(nufft.ishape), temp(nufft.ishape);
+  Cx3 q(nufft.oshape), input(nufft.oshape), value(nufft.oshape);
+  Re3 weights(nC, traj.nSamples(), traj.nTraces());
+  weights.setZero();
+  Index const N = Product(FirstN<3>(smaps.dimensions()));
+  std::vector<std::vector<double>> norms(nC, std::vector<double>(nB, 0.));
+  for (Index c = 0; c < nC; ++c) {
+    for (Index b = 0; b < nB; ++b) {
+      for (Index v = 0; v < N; ++v) { norms[c][b] += std::norm(DCx(smaps.data()[v + N * ((nMB == 1 ? 0 : b) + nMB * c)])); }
     }
-    Sz3 const slSt{si, 0, 0};
-    weights.slice(slSt, slSz).device(Threads::TensorDevice()) = nufft.forward(xcor).abs() * scale;
   }
-  Log::Print("Precon", "Before inversion min {} max {}", Minimum(weights), Maximum(weights));
-  weights.device(Threads::TensorDevice()) = (weights + weights.constant(λ)) / weights.constant(1.f + λ);
-  weights.device(Threads::TensorDevice()) = (weights == 0.f).select(weights.constant(1.f), weights);
-  weights.device(Threads::TensorDevice()) = weights.constant(1.f) / weights;
-
-  float const norm = Norm<true>(weights);
-  if (!std::isfinite(norm)) {
-    throw Log::Failure("Precon", "Pre-conditioner norm was not finite ({})", norm);
-  } else {
-    Log::Print("Precon", "Pre-conditioner finished, norm {} min {} max {}", norm, Minimum(weights), Maximum(weights));
+  float const scale = std::pow(Product(FirstN<3>(nufft.ishape)), 1.5f) / Product(traj.matrix());
+  for (Index b = 0; b < nB; ++b) {
+    for (Index d = b; d < nB; ++d) {
+      if (!ProductFeature(basis, b, d, q)) { continue; }
+      input.device(Threads::TensorDevice()) = q.conjugate();
+      nufft.adjoint(input, psf);
+      for (Index ci = 0; ci < nC; ++ci) {
+        xcor.setZero();
+        for (Index cj = 0; cj < nC; ++cj) {
+          auto product = [&](Index k, Cx5 &out) {
+            Index const mb = nMB == 1 ? 0 : k;
+            map.device(Threads::TensorDevice()) = smaps.slice(Sz5{0, 0, 0, mb, ci}, mapShape) *
+                                                  smaps.slice(Sz5{0, 0, 0, mb, cj}, mapShape).conjugate();
+            pad.forward(map, out);
+            FFT::Forward(out, Sz3{0, 1, 2});
+          };
+          product(b, fb);
+          if (b == d || nMB == 1) {
+            xcor.device(Threads::TensorDevice()) += fb * fb.conjugate();
+          } else {
+            product(d, fd);
+            xcor.device(Threads::TensorDevice()) += fb * fd.conjugate();
+          }
+        }
+        FFT::Adjoint(xcor, Sz3{0, 1, 2});
+        temp.device(Threads::TensorDevice()) = psf * xcor;
+        nufft.forward(temp, value);
+        Accumulate(weights, ci, value, basis, b, d, norms[ci], scale, b == d ? 1.f : 2.f);
+      }
+    }
   }
-  return weights;
+  return Invert(std::move(weights), basis, norms, traj.points(), λ);
 }
 
 template <int NB> auto LoadKSpacePrecon(std::string const &fname, Index const nSamp, Index const nTrace, Sz<3 + NB> const shape)
   -> TOps::TOp<3 + NB>::Ptr
 {
+  Log::Print("Precon", "Loading supplied weights unchanged from {}", fname);
   HD5::Reader reader(fname);
   Index const o = reader.order(HD5::Keys::Weights);
   if (o == 2) {
@@ -152,8 +224,8 @@ template <int NB> auto LoadKSpacePrecon(std::string const &fname, Index const nS
     return std::make_shared<TOps::TensorScale<3 + NB, 1, NB>>(shape, w.cast<Cx>());
   } else if (o == 3) {
     Re3 const w = reader.readTensor<Re3>(HD5::Keys::Weights);
-    if (w.dimension(0) != shape[1]) {
-      throw Log::Failure("Precon", "Preconditioner on disk had {} channels, expected {}", w.dimension(0), shape[1]);
+    if (w.dimension(0) != shape[0]) {
+      throw Log::Failure("Precon", "Preconditioner on disk had {} channels, expected {}", w.dimension(0), shape[0]);
     }
     if (w.dimension(1) != nSamp || w.dimension(2) != nTrace) {
       throw Log::Failure("Precon", "Preconditioner dimensions on disk {}x{} did not match trajectory {}x{}", w.dimension(1),
@@ -172,12 +244,13 @@ template <int ND, int NB> auto MakeKSpacePrecon(PreconOpts const      &opts,
                                                 Index const            nC,
                                                 Sz<NB> const           bshape) -> TOps::TOp<3 + NB>::Ptr
 {
+  if (!opts.basis && basis) { Log::Print("Precon", "Ignoring temporal basis for generated weights"); }
   auto const shape = Concatenate(Sz3{nC, traj.nSamples(), traj.nTraces()}, bshape);
   if (opts.type == "" || opts.type == "none") {
     Log::Print("Precon", "Using no preconditioning");
     return nullptr;
   } else if (opts.type == "single") {
-    Re2 const w = KSpaceSingle(gridOpts, traj, opts.λ, basis);
+    Re2 const w = KSpaceSingle(gridOpts, traj, opts.λ, opts.basis ? basis : nullptr);
     return std::make_shared<TOps::TensorScale<3 + NB, 1, NB>>(shape, w.cast<Cx>());
   } else if (opts.type == "multi") {
     throw Log::Failure("Precon", "Multichannel preconditioner requested without SENSE maps");
@@ -213,15 +286,16 @@ template <int ND, int NB> auto MakeKSpacePrecon(PreconOpts const      &opts,
                                                 Sz<NB> const           bshape) -> TOps::TOp<3 + NB, 3 + NB>::Ptr
 {
   Index const nC = smaps.dimension(4);
+  if (!opts.basis && basis) { Log::Print("Precon", "Ignoring temporal basis for generated weights"); }
   auto const  shape = Concatenate(Sz3{nC, traj.nSamples(), traj.nTraces()}, bshape);
   if (opts.type == "" || opts.type == "none") {
     Log::Print("Precon", "Using no preconditioning");
     return nullptr;
   } else if (opts.type == "single") {
-    Re2 const w = KSpaceSingle(gridOpts, traj, opts.λ, basis);
+    Re2 const w = KSpaceSingle(gridOpts, traj, opts.λ, opts.basis ? basis : nullptr);
     return std::make_shared<TOps::TensorScale<3 + NB, 1, NB>>(shape, w.cast<Cx>());
   } else if (opts.type == "multi") {
-    Re3 const w = KSpaceMulti(smaps, gridOpts, traj, opts.λ, basis);
+    Re3 const w = KSpaceMulti(smaps, gridOpts, traj, opts.λ, opts.basis ? basis : nullptr);
     return std::make_shared<TOps::TensorScale<3 + NB, 0, NB>>(shape, w.cast<Cx>());
   } else {
     return LoadKSpacePrecon<NB>(opts.type, traj.nSamples(), traj.nTraces(), shape);

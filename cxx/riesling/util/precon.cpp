@@ -15,12 +15,13 @@ void main_precon(args::Subparser &parser)
   args::ValueFlag<float>        preλ(parser, "λ", "Preconditioner regularization (0)", {"precon-l"}, 0.f);
   args::ValueFlag<std::string>  sfile(parser, "S", "Load SENSE kernels from file", {"sense"});
   args::ValueFlag<std::string>  basisFile(parser, "B", "Read basis from file", {"basis", 'b'});
+  args::Flag noBasis(parser, "N", "Ignore the temporal basis when generating weights", {"precon-no-basis"});
   ParseCommand(parser, trajFile);
   auto const  cmd = parser.GetCommand().Name();
   HD5::Reader reader(trajFile.Get());
   HD5::Writer writer(preFile.Get());
   Trajectory  traj(reader, reader.readStruct<Info>(HD5::Keys::Info).voxel_size);
-  auto const  basis = LoadBasis(basisFile.Get());
+  auto const  basis = LoadBasis(noBasis.Get() ? "" : basisFile.Get());
   if (sfile) {
     HD5::Reader senseReader(sfile.Get());
     Cx5 const   skern = senseReader.readTensor<Cx5>(HD5::Keys::Data);

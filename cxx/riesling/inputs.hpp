@@ -46,6 +46,7 @@ struct ReconArgs
 
 struct PreconArgs
 {
+  args::Flag noBasis;
   args::ValueFlag<std::string> type;
   args::ValueFlag<float>       λ;
 

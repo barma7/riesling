@@ -76,6 +76,47 @@ The x-update is inexact by design: a fixed number of warm-started CG iterations,
 
 **Time points one at a time.** ``--split-time`` handles time points (e.g. echoes) that no regularizer couples: none of ``--tvt``, ``--llr``, ``t`` in ``--iso`` or wavelets over time. Such problems are a sum of independent problems, and ADMM used to hold the state of all of them at once. With the option, each time point is solved on its own with a one-time-point encoding operator, so the solver state of only one is in memory. The data scale is still computed from all time points. The option is available for ADMM and PDHG, and refused with off-resonance correction or regularizers that couple time.
 
+Basis-aware k-space weights
+--------------------------
+
+The k-space weight generator follows the diagonal row formula in section VI of [Ong2020]_,
+
+.. math::
+
+   p_i = \frac{\|a_i\|^2}{\sum_j |a_i^H a_j|^2}.
+
+Including a temporal basis in the old NUFFT calculation introduced its signed overlap
+:math:`G_{ij}` into the sum, followed by an absolute value. Negative overlaps could
+cancel positive contributions and produce extremely large reciprocal weights. The
+formula requires :math:`|G_{ij}|^2` and division of the denominator by :math:`G_{ii}`.
+Taking an absolute value or clipping the resulting weights does not correct that formula.
+Single-channel generation retains the historical NUFFT/autocorrelation approximation
+over the nominal trajectory matrix. Increasing ``--fov`` does not change that nominal
+support, so these are not exact row-formula weights for every enlarged-FoV reconstruction
+operator. This fix corrects temporal overlaps without changing that spatial approximation.
+
+The implementation expands the squared overlap into products
+:math:`q_{bd}(i)=B_b(i)\overline{B_d(i)}`. Each product uses the same scalar NUFFT
+workspace; off-diagonal pairs contribute twice their real part, including for complex
+bases. Exactly zero products are skipped. This avoids allocating a grid for every
+product, at the cost of more NUFFT passes for dense bases. The encoding basis and
+its normalization are unchanged. Multichannel generation also includes coil row norms
+and cross-correlations between coefficient-dependent sensitivity maps.
+
+**Objective compatibility.** In ADMM/LSMR and ``--pdhg-weighted``, these weights are
+:math:`W` in the data objective, so correcting them can change the minimizer and the
+regularization balance. In unweighted PDHG they are solver step sizes. This fix does
+not introduce an independent solver preconditioner for a fixed weighted objective.
+Use ``--precon=file`` to retain an existing objective's weights, or
+``--precon-no-basis`` to generate weights without temporal overlaps. The latter still
+uses the basis for reconstruction; it is not an exact restoration of every historical
+version's clipping and regularization behavior.
+
+Tests compare tiny explicit complex Fourier encoding matrices against both generators,
+including negative overlaps, identity frames, row scaling, and coefficient-dependent
+coil maps. Correct weights alone do not establish faster convergence or quantitative
+map accuracy; those require comparisons with the intended objective held fixed.
+
 Fixes to the regularizers
 -------------------------
 

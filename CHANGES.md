@@ -21,6 +21,11 @@ sizes. Background and references: `docs/design.rst`.
 - Fixes that change results: exact adjoints of the divergence, TGV's symmetrized gradient and the Laplacians (the TGV
   objective changes, λ may need re-tuning); TGV can be combined with other regularizers (they were ignored); `--l1` with
   `--iso` normed the wrong dimensions.
+- K-space weights: squared complex temporal overlaps and row-norm normalization implement Ong's formula;
+  multichannel generation also corrects coil-map normalization and supports coefficient-dependent maps. Generated
+  weights can change the weighted reconstruction objective. `--precon-no-basis` excludes only the temporal basis
+  from generated weights; saved weights files and the encoding basis normalization are unchanged. Product features
+  stream through one scalar grid workspace. Loading multichannel weights now checks the channel axis correctly. See `docs/recon.rst` for cost and compatibility.
 - Smaller: `op-recon` for timing a recon's normal operator; `op-grid --fwd` with Cartesian input; zero-padded
   milliseconds in log durations; DUCC is fetched from GitHub.
 

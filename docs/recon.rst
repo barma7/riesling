@@ -39,9 +39,22 @@ The main reconstruction tool you should use is `recon-rlsq`_. This solves the re
 
     Run the SENSE + NUFFT operator on a CUDA GPU. Requires a build with ``-DRL_CUDA=ON`` (see the README). Only for 3D single-slab reconstructions, and not with ``--lowmem`` or ``--decant``. The GPU operator is the same operator as the CPU's to floating-point rounding (same kernel, apodization and scaling), so results do not change. ``recon-rlsq`` then uses it in the ADMM x-update, or, with ``--pdhg``, runs the whole PDHG iteration on the GPU. See :doc:`design`.
 
-* ``--precon=none/kspace/file``
+* ``--precon=none/single/multi/file``
 
     Choose a diagonal k-space preconditioner. The default is Frank Ong's preconditioner. See `F. Ong, M. Uecker, and M. Lustig, ‘Accelerating Non-Cartesian MRI Reconstruction Convergence Using k-Space Preconditioning’, IEEE Trans. Med. Imaging, vol. 39, no. 5, pp. 1646–1654, May 2020 <https://ieeexplore.ieee.org/document/8906069/>`_.
+
+    Generated weights use Ong's row formula ``p_i = ||a_i||^2 / sum_j |a_i^H a_j|^2`` with a NUFFT/autocorrelation approximation. The single-channel spatial kernel retains the nominal trajectory-matrix support even when ``--fov`` enlarges the reconstruction support. Temporal overlaps are squared in magnitude, including complex bases, and the row norm is included. Multichannel weights include coil-map row norms and cross-correlations between coefficient-dependent maps. This corrects previous signed-overlap cancellation and multichannel scaling; regenerating weights can therefore change results. Existing weights files are loaded unchanged.
+
+* ``--precon-no-basis``
+
+    Generate weights without the temporal basis while retaining the basis in the reconstruction operator. This also applies to ``riesling precon``. It has no effect when ``--precon`` names an existing weights file. Single-channel weights then depend only on the sampling geometry. For multichannel weights, coefficient-dependent maps require a matching basis; use shared maps for basis-free generation.
+
+    In LSMR, ADMM and ``--pdhg-weighted``, these weights define the data term, so changing them changes the objective and can require re-tuning the regularization strength. Unweighted PDHG uses them as solver step sizes. A separate choice of objective weights and solver preconditioner is not provided by this option. To reproduce an existing weighted reconstruction exactly, continue supplying its saved weights file.
+
+    Generation streams at most ``K(K+1)/2`` temporal products through one scalar NUFFT workspace, including complex bases. Exactly zero products are skipped (identity frames need only K passes). Dense bases require more NUFFT passes than the former K-vector calculation, but no K-squared set of image grids. The encoding basis normalization is unchanged.
+
+    ``--precon-l`` must be finite and nonnegative; the returned weight is ``(1+l)/(p_i^-1+l)``. Exactly zero encoding rows, including discarded trajectory samples, receive neutral weight 1. Nonfinite or nonpositive denominators for nonzero encoding rows cause an error instead of being hidden by an absolute value.
+
 
 recon-lsq
 ---------

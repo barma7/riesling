@@ -53,12 +53,13 @@ auto ReconArgs::Get() -> rl::ReconOpts
 }
 
 PreconArgs::PreconArgs(args::Subparser &parser)
-  : type(parser, "P", "Preconditioner (none/single/multi/filename)", {"precon", 'p'}, "single")
+  : noBasis(parser, "N", "Ignore the temporal basis when generating weights", {"precon-no-basis"})
+  , type(parser, "P", "Preconditioner (none/single/multi/filename)", {"precon", 'p'}, "single")
   , λ(parser, "λ", "Preconditioner regularization (0)", {"precon-l"}, 0.f)
 {
 }
 
-auto PreconArgs::Get() -> rl::PreconOpts { return rl::PreconOpts{.type = type.Get(), .λ = λ.Get()}; }
+auto PreconArgs::Get() -> rl::PreconOpts { return rl::PreconOpts{.type = type.Get(), .λ = λ.Get(), .basis = !noBasis.Get()}; }
 
 LSMRArgs::LSMRArgs(args::Subparser &parser)
   : its(parser, "N", "Max iterations (4)", {"max-its", 'i'}, 4)
