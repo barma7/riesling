@@ -14,6 +14,7 @@ template <int ND, typename KF = ExpSemi<4>> struct NUFFT final : TOp<ND + 2, 3>
 
   void iadjoint(OutCMap y, InMap x, float const s = 1.f) const;
   void iforward(InCMap x, OutMap y, float const s = 1.f) const;
+  auto covered() const -> BN<2> { return gridder.covered(); }
 
 private:
   Grid<ND, KF>       gridder;

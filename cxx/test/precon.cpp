@@ -187,6 +187,32 @@ TEST_CASE("Discarded trajectory rows receive neutral weights", "[precon]")
   CHECK(w(1, 0) == 1.f);
 }
 
+// Grid indices round to nearest, so a kept sample close enough to the +k wall lands one past the
+// last index and the gridder ignores it. Trajectory::init() only removes samples beyond the wall.
+TEST_CASE("Samples that round off the grid receive neutral weights", "[precon]")
+{
+  GridOpts<3> gridOpts;
+  gridOpts.osamp = GENERATE(1.f, 1.3f);
+  float const wall = GENERATE(8.f, 7.9f);
+  Re3         points(3, 3, 1);
+  points.setZero();
+  points(2, 1, 0) = wall;
+  points(2, 2, 0) = -wall; // Rounds to index 0, so this one stays on the grid
+  Trajectory const traj(points, Sz3{16, 16, 16});
+
+  auto const single = KSpaceSingle(gridOpts, traj);
+  CHECK(single(1, 0) == 1.f);
+  CHECK(single(2, 0) > 0.f);
+
+  Cx5 maps(16, 16, 16, 1, 2);
+  maps.setConstant(Cx(0.5f, 0.f));
+  auto const multi = KSpaceMulti(maps, gridOpts, traj, 0.f, nullptr);
+  for (Index c = 0; c < 2; ++c) {
+    CHECK(multi(c, 1, 0) == 1.f);
+    CHECK(multi(c, 2, 0) > 0.f);
+  }
+}
+
 TEST_CASE("Two dimensional weights and unitary basis invariance", "[precon]")
 {
   Index const M = 16;

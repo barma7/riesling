@@ -81,16 +81,16 @@ void Accumulate(Re3 &denom, Index channel, Cx3 const &value, Basis::CPtr basis,
   }
 }
 
-auto Invert(Re3 weights, Basis::CPtr basis, std::vector<std::vector<double>> const &norms, Re3 const &points, float λ) -> Re3
+// Samples the gridder ignored have no row in this calculation, whatever the trajectory says: besides
+// invalid points, a sample within half a grid cell of the +k wall rounds to one index past the end.
+auto Invert(Re3 weights, Basis::CPtr basis, std::vector<std::vector<double>> const &norms, BN<2> const &covered, float λ) -> Re3
 {
   for (Index t = 0; t < weights.dimension(2); ++t) {
     for (Index s = 0; s < weights.dimension(1); ++s) {
       for (Index c = 0; c < weights.dimension(0); ++c) {
         double norm = 0.;
         for (Index b = 0; b < Index(norms[c].size()); ++b) { norm += std::norm(BasisValue(basis, b, s, t)) * norms[c][b]; }
-        for (Index axis = 0; axis < points.dimension(0); ++axis) {
-          if (!std::isfinite(points(axis, s, t))) { norm = 0.; }
-        }
+        if (!covered(s, t)) { norm = 0.; }
         float const den = weights(c, s, t);
         if (norm > 0. && (!std::isfinite(den) || den <= 0.f)) {
           throw Log::Failure("Precon", "Nonpositive or nonfinite row denominator {} at channel {} sample {} trace {}", den, c, s, t);
@@ -143,7 +143,7 @@ template <int ND> auto KSpaceSingle(GridOpts<ND> const &gridOpts, TrajectoryN<ND
       Accumulate(weights, 0, value, basis, b, d, norms, scale, b == d ? 1.f : 2.f);
     }
   }
-  return Invert(std::move(weights), basis, {norms}, traj.points(), λ).template chip<0>(0);
+  return Invert(std::move(weights), basis, {norms}, nufft.covered(), λ).template chip<0>(0);
 }
 
 template auto KSpaceSingle(GridOpts<2> const &, TrajectoryN<2> const &, float const, Basis::CPtr) -> Re2;
@@ -206,7 +206,7 @@ auto KSpaceMulti(Cx5 const &smaps, GridOpts<3> const &gridOpts, Trajectory const
       }
     }
   }
-  return Invert(std::move(weights), basis, norms, traj.points(), λ);
+  return Invert(std::move(weights), basis, norms, nufft.covered(), λ);
 }
 
 template <int NB> auto LoadKSpacePrecon(std::string const &fname, Index const nSamp, Index const nTrace, Sz<3 + NB> const shape)

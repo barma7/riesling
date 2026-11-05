@@ -53,7 +53,7 @@ The main reconstruction tool you should use is `recon-rlsq`_. This solves the re
 
     Generation streams at most ``K(K+1)/2`` temporal products through one scalar NUFFT workspace, including complex bases. Exactly zero products are skipped (identity frames need only K passes). Dense bases require more NUFFT passes than the former K-vector calculation, but no K-squared set of image grids. The encoding basis normalization is unchanged.
 
-    ``--precon-l`` must be finite and nonnegative; the returned weight is ``(1+l)/(p_i^-1+l)``. Exactly zero encoding rows, including discarded trajectory samples, receive neutral weight 1. Nonfinite or nonpositive denominators for nonzero encoding rows cause an error instead of being hidden by an absolute value.
+    ``--precon-l`` must be finite and nonnegative; the returned weight is ``(1+l)/(p_i^-1+l)``. Exactly zero encoding rows, including discarded trajectory samples and samples that round off the grid at the +k edge, receive neutral weight 1. Nonfinite or nonpositive denominators for nonzero encoding rows cause an error instead of being hidden by an absolute value.
 
 
 recon-lsq

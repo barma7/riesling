@@ -28,6 +28,8 @@ template <int ND_, typename KF = rl::ExpSemi<4>, int SGSZ_ = 8> struct Grid fina
   Grid(GridOpts<ND> const &opts, TrajectoryN<ND> const &traj, Index const nC, Basis::CPtr b = nullptr);
   void  iforward(InCMap x, OutMap y, float const s = 1.f) const;
   void  iadjoint(OutCMap y, InMap x, float const s = 1.f) const;
+  //! Which samples (sample, trace) are on this grid. The others, invalid or rounded off it, are zero rows
+  auto  covered() const -> BN<2>;
   KType kernel;
 
 private:

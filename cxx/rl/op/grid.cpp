@@ -69,6 +69,18 @@ Grid<ND, KF, SG>::Grid(GridOpts<ND> const &opts, TrajectoryN<ND> const &traj, In
   Log::Debug("Grid", "ishape {} oshape {}", this->ishape, this->oshape);
 }
 
+template <int ND, typename KF, int SG> auto Grid<ND, KF, SG>::covered() const -> BN<2>
+{
+  BN<2> c(oshape[1], oshape[2]);
+  c.setConstant(false);
+  for (auto const &list : gridLists) {
+    for (auto const &m : list.coords) {
+      c(m.sample, m.trace) = true;
+    }
+  }
+  return c;
+}
+
 template <int ND, typename KF, int SG> void
 Grid<ND, KF, SG>::forwardTask(std::atomic<size_t> &next, float const s, CxNCMap<ND + 2> const x, Cx3Map y) const
 {
